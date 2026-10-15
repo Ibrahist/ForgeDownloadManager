@@ -1,0 +1,665 @@
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use rusqlite::{params, Connection, OptionalExtension, Row};
+use uuid::Uuid;
+
+use crate::error::Error;
+use crate::model::{
+    i64_to_u64, now_ms, u64_to_i64, ChecksumAlgo, Download, DownloadStatus, DuplicatePolicy,
+    Segment, SegmentStatus,
+};
+use crate::Result;
+
+pub const DEFAULT_QUEUE_ID: &str = "00000000-0000-4000-8000-000000000001";
+
+pub fn default_queue_id() -> Uuid {
+    Uuid::parse_str(DEFAULT_QUEUE_ID).expect("static queue id")
+}
+
+pub struct Store {
+    // transaction() needs &mut Connection. Callers share Store through a mutex, so the
+    // exclusive borrow stays inside the cell and the public methods keep &self.
+    conn: RefCell<Connection>,
+}
+
+impl Store {
+    pub fn open(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let mut conn = Connection::open(path)?;
+        init_pragmas(&conn)?;
+        migrate(&mut conn)?;
+        Ok(Self { conn: RefCell::new(conn) })
+    }
+
+    pub fn open_readonly(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(Self { conn: RefCell::new(conn) })
+    }
+
+    pub fn list_if_exists(path: &Path) -> Result<Vec<Download>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        Self::open_readonly(path)?.list()
+    }
+
+    pub fn insert_download(&self, download: &Download) -> Result<()> {
+        let headers = if download.headers.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&download.headers)?)
+        };
+        self.conn.borrow().execute(
+            "INSERT INTO downloads (
+                id, url, final_url, filename, save_dir, partial_path, queue_id, priority, status,
+                resumable, total_bytes, downloaded_bytes, etag, last_modified, content_type,
+                segment_count, user_agent, referer, headers_json, insecure_tls, checksum_algo,
+                checksum_expected, error_code, error_message, retry_count, max_retries,
+                duplicate_policy, created_at, updated_at, started_at, completed_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?18, ?19, ?20, ?21,
+                ?22, ?23, ?24, ?25, ?26,
+                ?27, ?28, ?29, ?30, ?31
+            )",
+            params![
+                download.id.to_string(),
+                download.url,
+                download.final_url,
+                download.filename,
+                path_str(&download.save_dir),
+                path_str(&download.partial_path),
+                download.queue_id.to_string(),
+                download.priority,
+                download.status.as_str(),
+                i64::from(download.resumable),
+                opt_u64(download.total_bytes)?,
+                u64_to_i64(download.downloaded_bytes)?,
+                download.etag,
+                download.last_modified,
+                download.content_type,
+                download.segment_count,
+                download.user_agent,
+                download.referer,
+                headers,
+                i64::from(download.insecure_tls),
+                download.checksum_algo.map(|algo| algo.as_str().to_string()),
+                download.checksum_expected,
+                download.error_code,
+                download.error_message,
+                download.retry_count,
+                download.max_retries,
+                download.duplicate_policy.as_str(),
+                download.created_at,
+                download.updated_at,
+                download.started_at,
+                download.completed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_file_location(&self, id: Uuid, filename: &str, path: &Path) -> Result<()> {
+        let changed = self.conn.borrow().execute(
+            "UPDATE downloads SET filename=?1, partial_path=?2, updated_at=?3 WHERE id=?4",
+            params![filename, path_str(path), now_ms(), id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn update_probe(
+        &self,
+        id: Uuid,
+        final_url: &str,
+        filename: &str,
+        partial_path: &Path,
+        resumable: bool,
+        total_bytes: Option<u64>,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+        content_type: Option<&str>,
+        segment_count: u32,
+    ) -> Result<()> {
+        self.conn.borrow().execute(
+            "UPDATE downloads SET
+                final_url=?1, filename=?2, partial_path=?3, resumable=?4, total_bytes=?5,
+                etag=?6, last_modified=?7, content_type=?8, segment_count=?9, updated_at=?10
+             WHERE id=?11",
+            params![
+                final_url,
+                filename,
+                path_str(partial_path),
+                i64::from(resumable),
+                opt_u64(total_bytes)?,
+                etag,
+                last_modified,
+                content_type,
+                segment_count,
+                now_ms(),
+                id.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_status(
+        &self,
+        id: Uuid,
+        status: DownloadStatus,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let now = now_ms();
+        let changed = self.conn.borrow().execute(
+            "UPDATE downloads SET
+                status=?1,
+                error_code=?2,
+                error_message=?3,
+                updated_at=?4,
+                started_at=CASE WHEN ?1 = 'downloading' AND started_at IS NULL THEN ?4 ELSE started_at END,
+                completed_at=CASE WHEN ?1 = 'completed' THEN ?4 ELSE completed_at END
+             WHERE id=?5",
+            params![status.as_str(), error_code, error_message, now, id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn update_cursors(
+        &self,
+        download_id: Uuid,
+        downloaded: u64,
+        rows: &[(Uuid, u64, SegmentStatus)],
+    ) -> Result<()> {
+        let now = now_ms();
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        for (id, cursor, status) in rows {
+            tx.execute(
+                "UPDATE segments SET cursor_byte=?1, status=?2, updated_at=?3 WHERE id=?4",
+                params![u64_to_i64(*cursor)?, status.as_str(), now, id.to_string()],
+            )?;
+        }
+        tx.execute(
+            "UPDATE downloads SET downloaded_bytes=?1, updated_at=?2 WHERE id=?3",
+            params![u64_to_i64(downloaded)?, now, download_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_open_ended(&self, download_id: Uuid, segment_id: Uuid, total: u64) -> Result<()> {
+        let total = u64_to_i64(total)?;
+        let now = now_ms();
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE segments SET end_byte=?1, cursor_byte=?1, status='done', updated_at=?2 WHERE id=?3",
+            params![total, now, segment_id.to_string()],
+        )?;
+        tx.execute(
+            "UPDATE downloads SET total_bytes=?1, downloaded_bytes=?1, resumable=0, updated_at=?2 WHERE id=?3",
+            params![total, now, download_id.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get(&self, id: Uuid) -> Result<Download> {
+        self.conn
+            .borrow()
+            .query_row("SELECT * FROM downloads WHERE id=?1", [id.to_string()], download_from_row)
+            .optional()?
+            .ok_or(Error::NotFound(id))
+    }
+
+    pub fn list(&self) -> Result<Vec<Download>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM downloads ORDER BY priority ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map([], download_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn resolve(&self, prefix: &str) -> Result<Uuid> {
+        let prefix = prefix.trim().to_ascii_lowercase();
+        if prefix.is_empty() {
+            return Err(Error::InvalidId("empty id".into()));
+        }
+        if let Ok(id) = Uuid::parse_str(&prefix) {
+            let _ = self.get(id)?;
+            return Ok(id);
+        }
+        let compact = prefix.replace('-', "");
+        let matches: Vec<Uuid> = self
+            .list()?
+            .into_iter()
+            .filter(|download| {
+                let full = download.id.to_string();
+                full.starts_with(&prefix) || full.replace('-', "").starts_with(&compact)
+            })
+            .map(|download| download.id)
+            .collect();
+        match matches.as_slice() {
+            [id] => Ok(*id),
+            [] => Err(Error::InvalidId(format!("no download matches {prefix}"))),
+            _ => Err(Error::InvalidId(format!("{prefix} matches more than one download"))),
+        }
+    }
+
+    pub fn segments_for(&self, id: Uuid) -> Result<Vec<Segment>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM segments WHERE download_id=?1 ORDER BY start_byte ASC",
+        )?;
+        let rows = stmt.query_map([id.to_string()], segment_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn replace_segments(&self, id: Uuid, segments: &[Segment]) -> Result<()> {
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM segments WHERE download_id=?1", [id.to_string()])?;
+        for segment in segments {
+            tx.execute(
+                "INSERT INTO segments (id, download_id, start_byte, end_byte, cursor_byte, status, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    segment.id.to_string(),
+                    segment.download_id.to_string(),
+                    u64_to_i64(segment.start_byte)?,
+                    opt_u64(segment.end_byte)?,
+                    u64_to_i64(segment.cursor_byte)?,
+                    segment.status.as_str(),
+                    segment.updated_at,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_download(&self, id: Uuid) -> Result<()> {
+        let changed = self.conn.borrow().execute("DELETE FROM downloads WHERE id=?1", [id.to_string()])?;
+        if changed == 0 {
+            return Err(Error::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn log(&self, id: Uuid, level: &str, message: &str) -> Result<()> {
+        self.conn.borrow().execute(
+            "INSERT INTO download_log (download_id, ts, level, message) VALUES (?1, ?2, ?3, ?4)",
+            params![id.to_string(), now_ms(), level, message],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_log(&self, id: Uuid, message: &str) -> Result<bool> {
+        let count: i64 = self.conn.borrow().query_row(
+            "SELECT COUNT(*) FROM download_log WHERE download_id=?1 AND message=?2",
+            params![id.to_string(), message],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn claim_queued(&self, limit: usize) -> Result<Vec<Uuid>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        let mut stmt = tx.prepare(
+            "SELECT id FROM downloads WHERE status = 'queued'
+             ORDER BY priority ASC, created_at ASC LIMIT ?1",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let now = now_ms();
+        for id in &ids {
+            tx.execute(
+                "UPDATE downloads
+                 SET status = 'downloading', updated_at = ?1,
+                     started_at = COALESCE(started_at, ?1)
+                 WHERE id = ?2 AND status = 'queued'",
+                params![now, id],
+            )?;
+        }
+        tx.commit()?;
+        ids.into_iter().map(|id| Uuid::parse_str(&id).map_err(|err| Error::InvalidId(err.to_string()))).collect()
+    }
+
+    pub fn count_active(&self) -> Result<usize> {
+        let count: i64 = self.conn.borrow().query_row(
+            "SELECT COUNT(*) FROM downloads WHERE status IN ('downloading', 'probing')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    pub fn requeue_interrupted(&self) -> Result<usize> {
+        let changed = self.conn.borrow().execute(
+            "UPDATE downloads SET status = 'queued', updated_at = ?1
+             WHERE status IN ('downloading', 'probing', 'ready')",
+            [now_ms()],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn queue_concurrency(&self, id: Uuid) -> Result<usize> {
+        let value: i64 = self.conn.borrow().query_row(
+            "SELECT concurrency FROM queues WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(usize::try_from(value).unwrap_or(1).max(1))
+    }
+
+    pub fn setting_u64(&self, key: &str) -> Result<Option<u64>> {
+        let raw: Option<String> = self
+            .conn
+            .borrow()
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0))
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        Ok(value.as_u64().or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok())))
+    }
+
+    pub fn setting_string(&self, key: &str) -> Result<Option<String>> {
+        let raw: Option<String> = self
+            .conn
+            .borrow()
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0))
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        Ok(Some(match value {
+            serde_json::Value::String(text) => text,
+            other => other.to_string(),
+        }))
+    }
+}
+
+fn init_pragmas(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(Duration::from_secs(5))?;
+    // foreign_keys is per connection. WAL keeps the CLI reader from blocking the engine.
+    let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")?;
+    Ok(())
+}
+
+fn migrate(conn: &mut Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at INTEGER NOT NULL
+        );",
+    )?;
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 1 {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(include_str!("../migrations/001_init.sql"))?;
+    seed(&tx)?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
+        [now_ms()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn seed(conn: &Connection) -> Result<()> {
+    let now = now_ms();
+    conn.execute(
+        "INSERT INTO queues (
+            id, name, concurrency, days_mask, on_complete, created_at
+        ) VALUES (?1, 'Default', 3, 127, 'none', ?2)",
+        params![DEFAULT_QUEUE_ID, now],
+    )?;
+    let categories = [
+        ("00000000-0000-4000-8000-000000000002", "Video", r#"["mp4","mkv","avi","mov","webm","m4v","mpg","mpeg","wmv","flv","ts"]"#, 1),
+        ("00000000-0000-4000-8000-000000000003", "Music", r#"["mp3","flac","wav","aac","ogg","m4a","wma","opus"]"#, 2),
+        ("00000000-0000-4000-8000-000000000004", "Documents", r#"["pdf","doc","docx","xls","xlsx","ppt","pptx","txt","rtf","odt","csv"]"#, 3),
+        ("00000000-0000-4000-8000-000000000005", "Compressed", r#"["zip","rar","7z","tar","gz","bz2","xz","iso"]"#, 4),
+        ("00000000-0000-4000-8000-000000000006", "Programs", r#"["exe","msi","dmg","pkg","deb","rpm","apk","appimage"]"#, 5),
+        ("00000000-0000-4000-8000-000000000007", "Other", "[]", 6),
+    ];
+    for (id, name, extensions, sort) in categories {
+        conn.execute(
+            "INSERT INTO categories (id, name, extensions, sort_order) VALUES (?1, ?2, ?3, ?4)",
+            params![id, name, extensions, sort],
+        )?;
+    }
+    let settings = [
+        ("max_concurrent_downloads", "3"),
+        ("per_host_connections", "16"),
+        ("default_segments", "8"),
+        ("min_segment_bytes", "1048576"),
+        ("user_agent", "\"ForgeDownloadManager/0.1\""),
+    ];
+    for (key, value) in settings {
+        conn.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", params![key, value])?;
+    }
+    Ok(())
+}
+
+fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Download> {
+    let status: String = row.get("status")?;
+    let policy: String = row.get("duplicate_policy")?;
+    let algo: Option<String> = row.get("checksum_algo")?;
+    let headers: Option<String> = row.get("headers_json")?;
+    Ok(Download {
+        id: parse_uuid(row, "id")?,
+        url: row.get("url")?,
+        final_url: row.get("final_url")?,
+        filename: row.get("filename")?,
+        save_dir: PathBuf::from(row.get::<_, String>("save_dir")?),
+        partial_path: PathBuf::from(row.get::<_, String>("partial_path")?),
+        queue_id: parse_uuid(row, "queue_id")?,
+        priority: row.get("priority")?,
+        status: parse_status(&status)?,
+        resumable: row.get::<_, i64>("resumable")? != 0,
+        total_bytes: opt_u64_col(row, "total_bytes")?,
+        downloaded_bytes: i64_to_u64(row.get("downloaded_bytes")?),
+        etag: row.get("etag")?,
+        last_modified: row.get("last_modified")?,
+        content_type: row.get("content_type")?,
+        segment_count: row.get::<_, i64>("segment_count")?.try_into().unwrap_or(1),
+        user_agent: row.get("user_agent")?,
+        referer: row.get("referer")?,
+        headers: parse_headers(headers)?,
+        insecure_tls: row.get::<_, i64>("insecure_tls")? != 0,
+        checksum_algo: match algo {
+            Some(value) => Some(parse_algo(&value)?),
+            None => None,
+        },
+        checksum_expected: row.get("checksum_expected")?,
+        error_code: row.get("error_code")?,
+        error_message: row.get("error_message")?,
+        retry_count: row.get::<_, i64>("retry_count")?.try_into().unwrap_or(0),
+        max_retries: row.get::<_, i64>("max_retries")?.try_into().unwrap_or(5),
+        duplicate_policy: parse_policy(&policy)?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        started_at: row.get("started_at")?,
+        completed_at: row.get("completed_at")?,
+    })
+}
+
+fn segment_from_row(row: &Row<'_>) -> rusqlite::Result<Segment> {
+    let status: String = row.get("status")?;
+    Ok(Segment {
+        id: parse_uuid(row, "id")?,
+        download_id: parse_uuid(row, "download_id")?,
+        start_byte: i64_to_u64(row.get("start_byte")?),
+        end_byte: opt_u64_col(row, "end_byte")?,
+        cursor_byte: i64_to_u64(row.get("cursor_byte")?),
+        status: parse_segment_status(&status)?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn parse_uuid(row: &Row<'_>, column: &str) -> rusqlite::Result<Uuid> {
+    let text: String = row.get(column)?;
+    Uuid::parse_str(&text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
+
+fn sql_convert(err: Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+}
+
+fn parse_status(value: &str) -> rusqlite::Result<DownloadStatus> {
+    DownloadStatus::parse(value).map_err(sql_convert)
+}
+
+fn parse_segment_status(value: &str) -> rusqlite::Result<SegmentStatus> {
+    SegmentStatus::parse(value).map_err(sql_convert)
+}
+
+fn parse_policy(value: &str) -> rusqlite::Result<DuplicatePolicy> {
+    DuplicatePolicy::parse(value).map_err(sql_convert)
+}
+
+fn parse_algo(value: &str) -> rusqlite::Result<ChecksumAlgo> {
+    ChecksumAlgo::parse(value).map_err(sql_convert)
+}
+
+fn parse_headers(raw: Option<String>) -> rusqlite::Result<Vec<(String, String)>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&raw).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
+
+fn opt_u64(value: Option<u64>) -> Result<Option<i64>> {
+    value.map(u64_to_i64).transpose()
+}
+
+fn opt_u64_col(row: &Row<'_>, column: &str) -> rusqlite::Result<Option<u64>> {
+    let value: Option<i64> = row.get(column)?;
+    Ok(value.map(i64_to_u64))
+}
+
+fn path_str(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::AddRequest;
+
+    fn sample(dir: &Path) -> Download {
+        let id = Uuid::new_v4();
+        let now = now_ms();
+        Download {
+            id,
+            url: "https://example.com/file.bin".into(),
+            final_url: None,
+            filename: "file.bin".into(),
+            save_dir: dir.to_path_buf(),
+            partial_path: dir.join("file.bin.forgepart"),
+            queue_id: default_queue_id(),
+            priority: 0,
+            status: DownloadStatus::Queued,
+            resumable: false,
+            total_bytes: Some(10),
+            downloaded_bytes: 0,
+            etag: None,
+            last_modified: None,
+            content_type: None,
+            segment_count: 4,
+            user_agent: Some("test".into()),
+            referer: None,
+            headers: vec![("X-Test".into(), "1".into())],
+            insecure_tls: false,
+            checksum_algo: Some(ChecksumAlgo::Sha256),
+            checksum_expected: Some("abc".into()),
+            error_code: None,
+            error_message: None,
+            retry_count: 0,
+            max_retries: 5,
+            duplicate_policy: DuplicatePolicy::Rename,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn roundtrip_and_cascade() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("forge.db");
+        let store = Store::open(&db).unwrap();
+        assert_eq!(store.setting_u64("default_segments").unwrap(), Some(8));
+        let download = sample(dir.path());
+        store.insert_download(&download).unwrap();
+        let loaded = store.get(download.id).unwrap();
+        assert_eq!(loaded.filename, "file.bin");
+        assert_eq!(loaded.headers, vec![("X-Test".into(), "1".into())]);
+        assert_eq!(loaded.checksum_algo, Some(ChecksumAlgo::Sha256));
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            download_id: download.id,
+            start_byte: 0,
+            end_byte: Some(10),
+            cursor_byte: 0,
+            status: SegmentStatus::Pending,
+            updated_at: now_ms(),
+        };
+        store.replace_segments(download.id, &[segment.clone()]).unwrap();
+        store.delete_download(download.id).unwrap();
+        assert!(store.segments_for(download.id).unwrap().is_empty());
+        assert!(store.get(download.id).is_err());
+        // Opening again does not duplicate the seeded queue.
+        drop(store);
+        let again = Store::open(&db).unwrap();
+        assert_eq!(again.queue_concurrency(default_queue_id()).unwrap(), 3);
+        let _ = AddRequest::new("https://example.com", dir.path());
+    }
+}

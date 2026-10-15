@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/forgedownloadmanager-core",
+    "crates/forgedownloadmanager-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Forge Download Manager contributors"]
+repository = "https://github.com/forgedownloadmanager/forgedownloadmanager"
+rust-version = "1.89"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
