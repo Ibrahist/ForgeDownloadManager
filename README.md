@@ -1,107 +1,122 @@
 # Forge Download Manager
 
-<<<<<<< HEAD
-Forge Download Manager is an open-source, cross-platform download manager. The Rust library, the `forge-dm` command, and the desktop window do segmented HTTP(S) and FTP/FTPS downloads, pause and resume, retries, proxies, keychain auth, cookies, bandwidth limits, and SQLite crash recovery.
-=======
-**A modern download manager designed to make downloading, organizing, and managing files easier.**
->>>>>>> 80e3209e3e4ce664e55351cb25051be2bb91f10f
+**An open-source, cross-platform download manager built in Rust.**
 
-Forge Download Manager is a software project focused on providing a streamlined download management experience. The goal is to make file transfers easier to monitor and manage through an intuitive interface.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Rust](https://img.shields.io/badge/Rust-1.89%2B-orange)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
-> **Project status:** Update this section to reflect whether the project is in development, ready for testing, or stable.
+Forge Download Manager is made up of a Rust engine library, a command-line tool (`forge-dm`), and a desktop window built with Tauri 2 and React. It handles segmented HTTP(S) and FTP/FTPS downloads, pause and resume, retries, proxies, keychain-backed authentication, cookies, bandwidth limits, and SQLite crash recovery.
+
+> **Status:** Early development (v0.1.0). The engine, CLI, and desktop shell are implemented. The browser extension, advanced queues/scheduling, site grabber, and media (HLS/DASH) support are planned. See [Roadmap](#roadmap).
 
 ## Table of Contents
 
-- [Overview](#overview)
 - [Features](#features)
-- [Technology Stack](#technology-stack)
-- [Getting Started](#getting-started)
-- [Installation](#installation)
-- [Usage](#usage)
 - [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [Desktop App](#desktop-app)
+- [CLI Usage](#cli-usage)
+- [Data Storage](#data-storage)
+- [How It Works](#how-it-works)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
 
-## Overview
-
-Forge Download Manager aims to provide a convenient way to manage file downloads in one place. The project focuses on usability, reliable transfer management, and a clean user experience.
-
-Whether managing individual files or multiple transfers, the application is intended to provide a centralized workspace for monitoring download activity.
-
 ## Features
 
-The following are intended features; retain only those implemented in the current version.
+- **Segmented downloads**: files are split into parallel HTTP range requests (default 8 segments, up to 32), with dynamic re-splitting when a connection finishes early.
+- **Pause and resume**: resumes only after re-probing the server and confirming the file has not changed (`ETag`, or `Last-Modified` + `Content-Length`).
+- **Crash recovery**: progress is flushed to SQLite at least once per second; downloads interrupted by a crash continue on next launch.
+- **Safe disk writes**: pre-allocated sparse files with positional writes, so segments never overlap and no merge pass is needed.
+- **Retries**: jittered exponential backoff, honoring `Retry-After` on 429/503.
+- **FTP / FTPS**: in-tree client behind the same worker interface as HTTP.
+- **Proxy support**: `system`, `direct`, `http`, `https`, or `socks5`, globally or per download.
+- **Authentication**: Basic and Digest; passwords are stored in the OS keychain, never in the database.
+- **Cookies**: per-download cookies for authenticated downloads.
+- **Bandwidth limits**: global and per-download token-bucket limiter.
+- **Integrity checks**: optional MD5, SHA-1, or SHA-256 verification on completion.
+- **Safe filenames**: sanitization, reserved-name rejection, path-escape protection, and a duplicate policy (`rename`, `overwrite`, `ask`).
+- **Desktop UI**: virtualized download list, per-connection segment map, and live speed graph.
+- **Single-owner engine**: the desktop app and CLI share one database; whichever process holds `engine.lock` runs the engine, and the other forwards commands over a token-protected loopback HTTP API.
 
-- **Download Management** — Manage downloads from a centralized interface.
-- **Progress Tracking** — Monitor download progress and transfer status.
-- **Pause and Resume** — Control transfers when supported by the download server.
-- **Download Queue** — Organize multiple downloads.
-- **File Organization** — Keep downloaded files organized.
-- **Modern Interface** — Provide a clean and intuitive user experience.
-- **Error Handling** — Communicate download failures and provide recovery options where supported.
-- **Performance** — Aim for efficient use of system resources.
+## Project Structure
 
-## Technology Stack
-
-The technologies used by this project depend on the current implementation.
-
-Update this section with the actual frameworks, programming languages, libraries, and tools used in the repository.
+```
+ForgeDownloadManager/
+├── crates/
+│   ├── forgedownloadmanager-core/   # Engine library (no UI)
+│   └── forgedownloadmanager-cli/    # `forge-dm` command-line front end
+├── apps/
+│   ├── desktop/                     # Tauri 2 + React + TypeScript + Tailwind window
+│   └── extension/                   # Browser extension (planned)
+├── docs/                            # Additional documentation (e.g. THIRD_PARTY.md)
+├── .github/workflows/               # CI
+├── ARCHITECTURE.md                  # Schema, state machine, and phase plan
+├── Cargo.toml                       # Rust workspace (engine + CLI)
+└── LICENSE
+```
 
 ## Getting Started
 
 ### Prerequisites
 
-Before installing the project, ensure you have the development tools required by its technology stack.
+- [Git](https://git-scm.com/)
+- [Rust](https://rustup.rs/) 1.89 or newer (1.90+ to build the desktop app)
+- [Node.js](https://nodejs.org/) and npm (desktop app only)
+- Linux only: system WebKitGTK libraries for the desktop window
 
-Examples include:
-
-- Git
-- The appropriate language runtime or SDK
-- A package manager or build tool
-- Any required system dependencies
-
-### Installation
-
-Clone the repository:
+### Build and test the engine and CLI
 
 ```bash
 git clone https://github.com/Ibrahist/ForgeDownloadManager.git
+cd ForgeDownloadManager
+cargo build --workspace
+cargo test --workspace
 ```
 
-<<<<<<< HEAD
-On Windows, that command uses the MSVC linker and the Windows SDK. A machine without them can use the GNU toolchain instead: install a MinGW `gcc` on `PATH`, then run `cargo +stable-x86_64-pc-windows-gnu test --workspace`. GitHub Actions uses the Windows runner's MSVC tools.
+The CLI binary is named `forge-dm`.
 
-## Desktop
+**Windows note:** the default build uses the MSVC linker and the Windows SDK. Without them, install a MinGW `gcc` on your `PATH` and run:
 
-The window lives in `apps/desktop` and is its own Cargo workspace, so the command above does not compile the WebView. That crate needs Rust 1.90 or newer because it links Tauri 2.12. The engine and CLI stay on Rust 1.89.
+```bash
+cargo +stable-x86_64-pc-windows-gnu test --workspace
+```
+
+CI uses the MSVC toolchain on Windows runners.
+
+## Desktop App
+
+The desktop window lives in `apps/desktop` and is a **separate Cargo workspace**, so `cargo test --workspace` at the repository root does not compile the WebView. It requires Rust 1.90+ (Tauri 2.12); the engine and CLI stay on 1.89.
 
 ```bash
 cd apps/desktop
 npm ci
 npm test
-npm run dev
-npm run tauri dev
+npm run dev          # UI only; downloads do NOT run in this mode
+npm run tauri dev    # full app; downloads run via forge-dm-desktop
 ```
 
-`npm run dev` shows the interface only. Downloads run inside `npm run tauri dev`, which starts `forge-dm-desktop`. A release-style compile, after `npm run build` in `apps/desktop`, is:
+For a release-style compile, run `npm run build` in `apps/desktop`, then:
 
 ```bash
 cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
 ```
 
-When this process wins `engine.lock`, it embeds the engine and serves the loopback HTTP API until it exits, including while the queue is idle. Closing the window leaves downloads running. The next launch requeues rows that were still downloading. If another process already holds the lock, the window forwards commands to it and refreshes the list about twice a second.
+Behavior to know about:
 
-A Windows GNU link can print `multiple non-default manifests` while merging the resource section. The binary still links. CI uses the MSVC linker. GitHub Actions builds the shell on Ubuntu, Windows, and macOS. It does not produce installers.
+- When the desktop process wins `engine.lock`, it embeds the engine and serves the loopback HTTP API until it exits, even while the queue is idle.
+- Closing the window leaves downloads running. The next launch requeues rows that were still downloading.
+- If another process already holds the lock, the window forwards commands to it and refreshes the list about twice a second.
+- On Windows with the GNU toolchain, you may see a `multiple non-default manifests` warning; the binary still links.
+- CI builds the shell on Ubuntu, Windows, and macOS but does not produce installers.
 
-The binary name is `forge-dm`. Data is stored in `%LOCALAPPDATA%\ForgeDownloadManager` on Windows, `~/Library/Application Support/ForgeDownloadManager` on macOS, or `$XDG_DATA_HOME/forgedownloadmanager` on Linux. `FORGE_DM_DATA` or `--data-dir` overrides that path.
+## CLI Usage
 
-## Commands
-
-```bash
+```text
 forge-dm add URL [--dir PATH] [--segments N] [--name FILE] [--no-start]
-    [--cookie Name=Value] [--speed-limit BPS] [--proxy MODE]
-    [--user USER] [--password-stdin]
+                 [--cookie Name=Value] [--speed-limit BPS] [--proxy MODE]
+                 [--user USER] [--password-stdin]
 forge-dm list [--json]
 forge-dm pause ID
 forge-dm resume ID
@@ -112,71 +127,51 @@ forge-dm config get SETTING
 forge-dm config set SETTING VALUE
 ```
 
-`--proxy` is `direct`, `system`, or a proxy URL (`http://`, `https://`, `socks5://`). `--password-stdin` reads one password line and stores it in the OS keychain. `auth set` does the same for `HOST` in `host:port` form. Passwords are not command-line arguments and are not written to SQLite. Settings are `proxy_mode`, `proxy_url`, `speed_limit_bps`, `max_concurrent_downloads`, `per_host_connections`, `default_segments`, `min_segment_bytes`, and `user_agent`.
+**Notes**
 
-`add` stays in the foreground until the download and any recovered queued work finish. Progress is printed to stderr. The download id is printed to stdout. Exit codes are `0` success, `2` download failed, `1` usage or another error, and `130` after Ctrl-C (active downloads are paused first).
-=======
-Navigate to the project directory:
+- `--proxy` accepts `direct`, `system`, or a proxy URL (`http://`, `https://`, `socks5://`).
+- `--password-stdin` reads one password line and stores it in the OS keychain. `auth set` does the same for `HOST` in `host:port` form. Passwords are never passed as command-line arguments and never written to SQLite.
+- Available settings: `proxy_mode`, `proxy_url`, `speed_limit_bps`, `max_concurrent_downloads`, `per_host_connections`, `default_segments`, `min_segment_bytes`, `user_agent`.
+- `add` stays in the foreground until the download (and any recovered queued work) finishes. Progress goes to stderr; the download ID goes to stdout.
+- Exit codes: `0` success, `1` usage or other error, `2` download failed, `130` after Ctrl-C (active downloads are paused first).
+
+**Example**
 
 ```bash
-cd ForgeDownloadManager
+forge-dm add https://example.com/big-file.iso --dir ~/Downloads --segments 8
+forge-dm list --json
 ```
 
-Install dependencies using the package manager or build tool appropriate for the project.
->>>>>>> 80e3209e3e4ce664e55351cb25051be2bb91f10f
+## Data Storage
 
-Then follow the project's build and execution instructions.
+| Platform | Location |
+| -------- | -------- |
+| Windows  | `%LOCALAPPDATA%\ForgeDownloadManager` |
+| macOS    | `~/Library/Application Support/ForgeDownloadManager` |
+| Linux    | `$XDG_DATA_HOME/forgedownloadmanager` |
 
-> **Note:** The exact installation commands depend on the repository's actual technology stack. Add the verified commands here so developers can run the project without guesswork.
+Override with the `FORGE_DM_DATA` environment variable or the `--data-dir` flag. The directory contains `forge.db` (SQLite, WAL mode) and `engine.lock` (PID, API port, and auth token).
 
-<<<<<<< HEAD
-- `crates/forgedownloadmanager-core` — engine
-- `crates/forgedownloadmanager-cli` — `forge-dm`
-- `apps/desktop` — Tauri 2 + React window (`forge-dm-desktop`)
-- `apps/extension` — later phase
-- `ARCHITECTURE.md` — schema and phase plan
-=======
-## Usage
->>>>>>> 80e3209e3e4ce664e55351cb25051be2bb91f10f
+## How It Works
 
-Once the application is installed and running, use the interface and functionality available in the current version to manage your downloads.
+- **Probe:** `HEAD` the URL (falling back to `GET` with `Range: bytes=0-0`) to learn size, range support, and validators.
+- **Segment:** split the file into equal ranges, no smaller than the minimum segment size (default 1 MiB), so small files use a single connection.
+- **Write:** each worker writes only inside its own byte range using positional I/O; the cursor advances only after a flush.
+- **Persist:** state is committed to SQLite at least once per second, so a crash re-downloads at most a short suffix and never leaves a believed-complete hole.
+- **Security:** the control API listens on loopback only, requires a 256-bit bearer token, and rejects browser `Origin` headers. TLS verification is on by default.
 
-<<<<<<< HEAD
-The browser extension, queues and schedules beyond the seeded Default queue, the site grabber, HLS/DASH, installers, and SFTP. Linux builds do not use an OS keychain: the secret-service backend depends on dbus (AFL/GPL), which this MIT app does not link. See `ARCHITECTURE.md`.
-=======
-Document the supported workflows here, including how to add a download, choose a destination, monitor progress, and manage completed or failed transfers.
->>>>>>> 80e3209e3e4ce664e55351cb25051be2bb91f10f
-
-## Project Structure
-
-The repository structure depends on the implementation. A typical project may organize its code into:
-
-```text
-ForgeDownloadManager/
-├── src/              # Application source code
-├── public/            # Static assets, if applicable
-├── tests/             # Automated tests, if available
-├── docs/              # Documentation
-├── README.md
-└── LICENSE
-```
-
-Adapt this tree to match the actual repository.
+For the full design, database schema, state machine, and phase plan, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Roadmap
 
-Potential future improvements include:
-
-- [ ] Improve download management and monitoring.
-- [ ] Add robust error handling and retry mechanisms.
-- [ ] Improve download queue management.
-- [ ] Add pause and resume support where possible.
-- [ ] Improve the user interface and accessibility.
-- [ ] Add automated tests.
-- [ ] Expand documentation.
-- [ ] Explore browser integration and cross-platform support.
-
-Roadmap items should be updated as development progresses.
+- [x] **Phase 1:** core engine, segmented downloads, pause/resume, SQLite recovery, CLI
+- [x] **Phase 2:** dynamic split, retries, proxies, authentication, cookies, FTP/FTPS, bandwidth limiter
+- [x] **Phase 3:** desktop shell (Tauri 2 + React)
+- [ ] **Phase 4:** queues and schedules beyond the default queue, site grabber
+- [ ] **Phase 5:** browser extension (Manifest V3, Native Messaging)
+- [ ] **Phase 6:** HLS/DASH media downloads, ffmpeg remux, optional yt-dlp plugin
+- [ ] **Phase 7:** installers
+- [ ] SFTP and a Linux OS keychain backend (the secret-service backend depends on dbus, whose license is incompatible with this MIT app)
 
 ## Contributing
 
@@ -184,37 +179,18 @@ Contributions, suggestions, and bug reports are welcome.
 
 1. Fork the repository.
 2. Create a feature branch.
-3. Make your changes.
-4. Test your implementation.
-5. Submit a pull request describing your changes.
+3. Make your changes and add tests.
+4. Run `cargo test --workspace` (and `npm test` in `apps/desktop` for UI changes).
+5. Open a pull request describing your changes.
 
-For significant changes, open an issue first to discuss the proposed implementation.
+For significant changes, please open an issue first. New dependencies must be MIT, Apache-2.0, BSD, ISC, or public domain; anything else needs discussion first. Third-party license notes are in `docs/THIRD_PARTY.md`.
 
-## Issues and Support
-
-If you encounter a bug or have a feature request, visit the repository's [Issues](https://github.com/Ibrahist/ForgeDownloadManager/issues) page.
-
-When reporting a bug, include:
-
-- A description of the problem.
-- Steps to reproduce it.
-- Expected and actual behavior.
-- Relevant error messages.
-- Your operating system and application version.
+Found a bug? Open an [issue](https://github.com/Ibrahist/ForgeDownloadManager/issues) with steps to reproduce, expected vs. actual behavior, error messages, and your OS and version.
 
 ## License
 
-Check the repository's `LICENSE` file for the applicable license and terms of use.
-
-If the project does not yet have a license, choose and add one before distributing it as open-source software.
+Released under the [MIT License](LICENSE).
 
 ## Author
 
-**Ibrahist**
-
-- GitHub: [@Ibrahist](https://github.com/Ibrahist)
-- Project: [Forge Download Manager](https://github.com/Ibrahist/ForgeDownloadManager)
-
----
-
-*Forge Download Manager — a project focused on making file downloads easier to manage.*
+**Ibrahist**: [@Ibrahist](https://github.com/Ibrahist)
