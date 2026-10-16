@@ -38,6 +38,43 @@ pub fn plan_segments(total: u64, requested: u32, min_segment_bytes: u64) -> Vec<
     out
 }
 
+/// Midpoint of the bytes still left in `[cursor, end)`, when both sides stay
+/// at least `min_segment_bytes`.
+pub fn split_remainder(cursor: u64, end: u64, min_segment_bytes: u64) -> Option<u64> {
+    if end <= cursor {
+        return None;
+    }
+    let min = min_segment_bytes.max(1);
+    let remain = end - cursor;
+    if remain < min.saturating_mul(2) {
+        return None;
+    }
+    let mid = cursor + remain / 2;
+    if mid - cursor < min || end - mid < min {
+        return None;
+    }
+    Some(mid)
+}
+
+/// Index and new exclusive end of the incomplete piece with the largest remainder.
+/// `segment_count` counts every piece already in the plan. The cap is 32.
+pub fn propose_split(parts: &[(u64, u64)], min_segment_bytes: u64, segment_count: usize) -> Option<(usize, u64)> {
+    if segment_count >= 32 {
+        return None;
+    }
+    let mut best: Option<(usize, u64, u64)> = None;
+    for (index, &(cursor, end)) in parts.iter().enumerate() {
+        let Some(mid) = split_remainder(cursor, end, min_segment_bytes) else {
+            continue;
+        };
+        let remain = end - cursor;
+        if best.map(|(_, largest, _)| remain > largest).unwrap_or(true) {
+            best = Some((index, remain, mid));
+        }
+    }
+    best.map(|(index, _, mid)| (index, mid))
+}
+
 pub fn validate_coverage(total: u64, parts: &[ByteRange]) -> Result<(), String> {
     if total == 0 {
         return if parts.is_empty() {
@@ -99,6 +136,40 @@ mod tests {
         let parts = plan_segments(10_000, 100, 1);
         assert_eq!(parts.len(), 32);
         validate_coverage(10_000, &parts).unwrap();
+    }
+
+    #[test]
+    fn split_uses_the_middle_of_the_remainder() {
+        assert_eq!(split_remainder(0, 4096, 1024), Some(2048));
+        assert_eq!(split_remainder(1000, 5000, 1024), Some(3000));
+        assert!(split_remainder(0, 2047, 1024).is_none());
+        assert!(split_remainder(10, 10, 1).is_none());
+    }
+
+    #[test]
+    fn propose_split_picks_the_largest_and_stops_at_32() {
+        let parts = [(0, 100), (100, 900), (900, 1000)];
+        assert_eq!(propose_split(&parts, 100, 3), Some((1, 500)));
+        assert!(propose_split(&parts, 100, 32).is_none());
+    }
+
+    #[test]
+    fn repeated_splits_keep_covering_the_file() {
+        let total = 16 * 1024;
+        let mut parts = plan_segments(total, 2, 1024);
+        for _ in 0..8 {
+            let view: Vec<(u64, u64)> = parts.iter().map(|part| (part.start, part.end)).collect();
+            let Some((index, mid)) = propose_split(&view, 1024, parts.len()) else {
+                break;
+            };
+            let old_end = parts[index].end;
+            parts[index].end = mid;
+            parts.push(ByteRange { start: mid, end: old_end });
+            parts.sort_by_key(|part| part.start);
+            validate_coverage(total, &parts).unwrap();
+            assert!(parts.len() <= 32);
+        }
+        assert!(parts.len() > 2);
     }
 
     #[test]

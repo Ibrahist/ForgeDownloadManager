@@ -1,22 +1,27 @@
 //! Segmented download engine.
 //!
-//! Phase 1 covers HTTP(S) probe, equal segment splits, sparse writes,
-//! pause/resume, and SQLite crash recovery. Dynamic splitting, retries,
-//! proxies, and authentication are later phases.
+//! Phase 2 adds dynamic splitting, retries, proxies, keychain authentication,
+//! cookies, a bandwidth limiter, and FTP/FTPS. The desktop UI is a later phase.
 
+pub mod auth;
 pub mod checksum;
 pub mod config;
 pub mod control;
 pub mod error;
 pub mod events;
 pub mod filename;
+pub mod limiter;
 pub mod model;
 pub mod probe;
+pub mod proxy;
+pub mod retry;
+pub mod secrets;
 pub mod segment;
 pub mod store;
 
 mod download;
 mod engine;
+mod ftp;
 mod rawhttp;
 mod writer;
 

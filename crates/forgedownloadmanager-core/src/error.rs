@@ -27,6 +27,9 @@ pub enum Error {
     Http { status: u16, message: String },
     #[error("incomplete response")]
     Incomplete,
+    /// 429 or 503. `retry_after_ms` is set only for a delta-seconds Retry-After.
+    #[error("rate limited")]
+    RateLimited { retry_after_ms: Option<u64> },
     #[error("cancelled")]
     Cancelled,
     #[error("a filename already exists and the duplicate policy is ask")]
@@ -57,7 +60,7 @@ impl Error {
             Error::ChecksumMismatch { .. } => "checksum_mismatch",
             Error::AuthRequired => "auth_required",
             Error::Io(_) | Error::PathEscape => "io",
-            Error::Incomplete | Error::HttpClient(_) | Error::Http { .. } => "network",
+            Error::Incomplete | Error::HttpClient(_) | Error::Http { .. } | Error::RateLimited { .. } => "network",
             Error::Cancelled => "cancelled",
             _ => "failed",
         }

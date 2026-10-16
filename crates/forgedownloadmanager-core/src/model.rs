@@ -163,7 +163,8 @@ impl ChecksumAlgo {
 }
 
 /// What the caller asked to add. The engine fills in probe results later.
-#[derive(Debug, Clone)]
+/// `password` is handed to the keychain and is not stored on the download row.
+#[derive(Clone)]
 pub struct AddRequest {
     pub url: String,
     pub save_dir: PathBuf,
@@ -173,6 +174,12 @@ pub struct AddRequest {
     pub referer: Option<String>,
     pub user_agent: Option<String>,
     pub headers: Vec<(String, String)>,
+    pub cookies: Vec<(String, String)>,
+    pub proxy: Option<String>,
+    pub speed_limit_bps: Option<u64>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub max_retries: Option<u32>,
     pub insecure_tls: bool,
     pub duplicate_policy: DuplicatePolicy,
     pub checksum_algo: Option<ChecksumAlgo>,
@@ -190,11 +197,33 @@ impl AddRequest {
             referer: None,
             user_agent: None,
             headers: Vec::new(),
+            cookies: Vec::new(),
+            proxy: None,
+            speed_limit_bps: None,
+            username: None,
+            password: None,
+            max_retries: None,
             insecure_tls: false,
             duplicate_policy: DuplicatePolicy::Rename,
             checksum_algo: None,
             checksum_expected: None,
         }
+    }
+}
+
+impl std::fmt::Debug for AddRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AddRequest")
+            .field("url", &self.url)
+            .field("save_dir", &self.save_dir)
+            .field("filename", &self.filename)
+            .field("segments", &self.segments)
+            .field("start", &self.start)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "redacted"))
+            .field("max_retries", &self.max_retries)
+            .finish()
     }
 }
 
@@ -219,6 +248,14 @@ pub struct Download {
     pub user_agent: Option<String>,
     pub referer: Option<String>,
     pub headers: Vec<(String, String)>,
+    #[serde(default)]
+    pub cookies: Vec<(String, String)>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default)]
+    pub credential_id: Option<Uuid>,
+    #[serde(default)]
+    pub speed_limit_bps: Option<u64>,
     pub insecure_tls: bool,
     pub checksum_algo: Option<ChecksumAlgo>,
     pub checksum_expected: Option<String>,

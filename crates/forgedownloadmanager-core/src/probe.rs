@@ -1,9 +1,10 @@
 use reqwest::header::{
-    ACCEPT_ENCODING, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG,
-    LAST_MODIFIED, RANGE, REFERER, USER_AGENT,
+    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, COOKIE, ETAG,
+    LAST_MODIFIED, RANGE, REFERER, USER_AGENT, WWW_AUTHENTICATE,
 };
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 
+use crate::auth::{self, AuthMaterial};
 use crate::error::Error;
 use crate::filename::filename_from_content_disposition;
 use crate::Result;
@@ -14,6 +15,8 @@ pub struct RequestMeta {
     pub user_agent: String,
     pub referer: Option<String>,
     pub headers: Vec<(String, String)>,
+    pub cookies: Vec<(String, String)>,
+    pub auth: Option<AuthMaterial>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,15 +45,74 @@ pub fn apply_request(builder: RequestBuilder, meta: &RequestMeta) -> RequestBuil
     if let Some(referer) = &meta.referer {
         builder = builder.header(REFERER, referer);
     }
+    // Cookies go on first. A user Cookie header, applied below, is the one that is sent.
+    if !has_header(&meta.headers, "cookie") {
+        if let Some(cookie) = cookie_header(&meta.cookies) {
+            builder = builder.header(COOKIE, cookie);
+        }
+    }
+    if !has_header(&meta.headers, "authorization") {
+        if let Some(header) = meta.auth.as_ref().and_then(AuthMaterial::cached_header) {
+            builder = builder.header(AUTHORIZATION, header);
+        }
+    }
     for (name, value) in &meta.headers {
         builder = builder.header(name, value);
     }
     builder
 }
 
+fn has_header(headers: &[(String, String)], name: &str) -> bool {
+    headers.iter().any(|(header, _)| header.eq_ignore_ascii_case(name))
+}
+
+fn cookie_header(cookies: &[(String, String)]) -> Option<String> {
+    if cookies.is_empty() {
+        return None;
+    }
+    Some(cookies.iter().map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>().join("; "))
+}
+
+/// Send, and on 401 answer the challenge once. That handshake does not count as a retry.
+pub async fn send_with_auth(
+    meta: &RequestMeta,
+    method: &str,
+    uri: &str,
+    build: impl Fn() -> RequestBuilder,
+) -> Result<Response> {
+    let response = apply_request(build(), meta).send().await?;
+    if response.status() != StatusCode::UNAUTHORIZED {
+        return Ok(response);
+    }
+    if has_header(&meta.headers, "authorization") {
+        return Err(Error::AuthRequired);
+    }
+    let www = response
+        .headers()
+        .get(WWW_AUTHENTICATE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    drop(response);
+    let Some(auth) = &meta.auth else {
+        return Err(Error::AuthRequired);
+    };
+    let Some(header) = auth::authorization_from_challenge(auth, &www, method, uri)? else {
+        return Err(Error::AuthRequired);
+    };
+    auth.store_header(header);
+    let response = apply_request(build(), meta).send().await?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return Err(Error::AuthRequired);
+    }
+    Ok(response)
+}
+
 pub async fn probe_url(client: &Client, url: &str, meta: &RequestMeta) -> Result<Probe> {
-    let head = match apply_request(client.head(url), meta).send().await {
+    let target = auth::request_target(url);
+    let head = match send_with_auth(meta, "HEAD", &target, || client.head(url)).await {
         Ok(response) => Some(response),
+        Err(Error::AuthRequired) => return Err(Error::AuthRequired),
         Err(err) => {
             tracing::debug!("HEAD failed, trying a ranged GET: {err}");
             None
@@ -77,10 +139,7 @@ pub async fn probe_url(client: &Client, url: &str, meta: &RequestMeta) -> Result
     }
 
     // A 200 here is the whole object. Read headers only and drop the body.
-    let response = apply_request(client.get(url), meta)
-        .header(RANGE, "bytes=0-0")
-        .send()
-        .await?;
+    let response = send_with_auth(meta, "GET", &target, || client.get(url).header(RANGE, "bytes=0-0")).await?;
     classify_probe_status(response.status())?;
     let status = response.status();
     let snap = snapshot(&response);
@@ -183,13 +242,16 @@ pub fn classify_probe_status(status: StatusCode) -> Result<()> {
     }
 }
 
-pub fn classify_transfer_status(status: StatusCode) -> Result<()> {
+pub fn classify_transfer_status(status: StatusCode, retry_after: Option<&str>) -> Result<()> {
     match status.as_u16() {
         200 | 206 => Ok(()),
         401 => Err(Error::AuthRequired),
         403 | 410 => Err(Error::LinkExpired),
         404 => Err(Error::Http { status: 404, message: "not found".into() }),
         416 => Err(Error::RemoteChanged),
+        429 | 503 => Err(Error::RateLimited {
+            retry_after_ms: retry_after.and_then(crate::retry::parse_retry_after),
+        }),
         status => Err(Error::Http { status, message: "unexpected status".into() }),
     }
 }

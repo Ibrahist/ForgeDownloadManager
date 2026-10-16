@@ -54,24 +54,23 @@ impl Store {
     }
 
     pub fn insert_download(&self, download: &Download) -> Result<()> {
-        let headers = if download.headers.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&download.headers)?)
-        };
+        let headers = json_pairs(&download.headers)?;
+        let cookies = json_pairs(&download.cookies)?;
         self.conn.borrow().execute(
             "INSERT INTO downloads (
                 id, url, final_url, filename, save_dir, partial_path, queue_id, priority, status,
                 resumable, total_bytes, downloaded_bytes, etag, last_modified, content_type,
                 segment_count, user_agent, referer, headers_json, insecure_tls, checksum_algo,
                 checksum_expected, error_code, error_message, retry_count, max_retries,
-                duplicate_policy, created_at, updated_at, started_at, completed_at
+                duplicate_policy, created_at, updated_at, started_at, completed_at,
+                cookies_json, proxy_json, credential_id, speed_limit_bps
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
                 ?10, ?11, ?12, ?13, ?14, ?15,
                 ?16, ?17, ?18, ?19, ?20, ?21,
                 ?22, ?23, ?24, ?25, ?26,
-                ?27, ?28, ?29, ?30, ?31
+                ?27, ?28, ?29, ?30, ?31,
+                ?32, ?33, ?34, ?35
             )",
             params![
                 download.id.to_string(),
@@ -105,6 +104,10 @@ impl Store {
                 download.updated_at,
                 download.started_at,
                 download.completed_at,
+                cookies,
+                download.proxy,
+                download.credential_id.map(|id| id.to_string()),
+                opt_u64(download.speed_limit_bps)?,
             ],
         )?;
         Ok(())
@@ -178,6 +181,47 @@ impl Store {
         if changed == 0 {
             return Err(Error::NotFound(id));
         }
+        Ok(())
+    }
+
+    pub fn set_retry_count(&self, id: Uuid, count: u32) -> Result<()> {
+        self.conn.borrow().execute(
+            "UPDATE downloads SET retry_count = MAX(retry_count, ?1), updated_at = ?2 WHERE id = ?3",
+            params![count, now_ms(), id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Shrink one segment and insert the tail. The caller has already published the new end in memory.
+    pub fn split_segment(&self, download_id: Uuid, parent_id: Uuid, new_end: u64, tail: &Segment) -> Result<()> {
+        let now = now_ms();
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE segments SET end_byte=?1, updated_at=?2 WHERE id=?3",
+            params![u64_to_i64(new_end)?, now, parent_id.to_string()],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound(parent_id));
+        }
+        tx.execute(
+            "INSERT INTO segments (id, download_id, start_byte, end_byte, cursor_byte, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                tail.id.to_string(),
+                tail.download_id.to_string(),
+                u64_to_i64(tail.start_byte)?,
+                opt_u64(tail.end_byte)?,
+                u64_to_i64(tail.cursor_byte)?,
+                tail.status.as_str(),
+                tail.updated_at,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE downloads SET segment_count = segment_count + 1, updated_at=?1 WHERE id=?2",
+            params![now, download_id.to_string()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -397,6 +441,89 @@ impl Store {
         Ok(value.as_u64().or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok())))
     }
 
+    pub fn queue_speed_limit(&self, id: Uuid) -> Result<Option<u64>> {
+        let value: Option<i64> = self.conn.borrow().query_row(
+            "SELECT speed_limit_bps FROM queues WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok(value.map(i64_to_u64).filter(|rate| *rate > 0))
+    }
+
+    pub fn setting_value(&self, key: &str) -> Result<Option<serde_json::Value>> {
+        let raw: Option<String> = self
+            .conn
+            .borrow()
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get(0))
+            .optional()?;
+        raw.map(|raw| serde_json::from_str(&raw).map_err(Error::from)).transpose()
+    }
+
+    pub fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
+        crate::config::validate_setting(key, value)?;
+        let raw = serde_json::to_string(value)?;
+        self.conn.borrow().execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, raw],
+        )?;
+        Ok(())
+    }
+
+    pub fn upsert_credential(&self, host: &str, username: &str, scheme: &str) -> Result<Credential> {
+        if let Some(existing) = self.find_credential(host, username)? {
+            self.conn.borrow().execute(
+                "UPDATE credentials SET auth_scheme=?1 WHERE id=?2",
+                params![scheme, existing.id.to_string()],
+            )?;
+            return Ok(existing);
+        }
+        let row = Credential {
+            id: Uuid::new_v4(),
+            host: host.to_string(),
+            username: username.to_string(),
+            keychain_id: Uuid::new_v4().to_string(),
+            auth_scheme: scheme.to_string(),
+        };
+        self.conn.borrow().execute(
+            "INSERT INTO credentials (id, host, username, keychain_id, auth_scheme, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                row.id.to_string(),
+                row.host,
+                row.username,
+                row.keychain_id,
+                row.auth_scheme,
+                now_ms()
+            ],
+        )?;
+        Ok(row)
+    }
+
+    pub fn find_credential(&self, host: &str, username: &str) -> Result<Option<Credential>> {
+        self.conn
+            .borrow()
+            .query_row(
+                "SELECT id, host, username, keychain_id, auth_scheme FROM credentials WHERE host=?1 AND username=?2",
+                params![host, username],
+                credential_from_row,
+            )
+            .optional()
+            .map_err(Error::from)
+    }
+
+    pub fn get_credential(&self, id: Uuid) -> Result<Credential> {
+        self.conn
+            .borrow()
+            .query_row(
+                "SELECT id, host, username, keychain_id, auth_scheme FROM credentials WHERE id=?1",
+                [id.to_string()],
+                credential_from_row,
+            )
+            .optional()?
+            .ok_or(Error::NotFound(id))
+    }
+
     pub fn setting_string(&self, key: &str) -> Result<Option<String>> {
         let raw: Option<String> = self
             .conn
@@ -434,17 +561,41 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    if current >= 1 {
-        return Ok(());
+    if current < 1 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(include_str!("../migrations/001_init.sql"))?;
+        seed(&tx)?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
+            [now_ms()],
+        )?;
+        tx.commit()?;
     }
-    let tx = conn.transaction()?;
-    tx.execute_batch(include_str!("../migrations/001_init.sql"))?;
-    seed(&tx)?;
-    tx.execute(
-        "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
-        [now_ms()],
-    )?;
-    tx.commit()?;
+    // Fresh databases run version 1 and then this insert. Existing Phase 1 databases only run this.
+    if current < 2 {
+        let tx = conn.transaction()?;
+        seed_proxy_settings(&tx)?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?1)",
+            [now_ms()],
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+fn seed_proxy_settings(conn: &Connection) -> Result<()> {
+    let settings = [
+        ("proxy_mode", "\"direct\""),
+        ("proxy_url", "null"),
+        ("speed_limit_bps", "null"),
+    ];
+    for (key, value) in settings {
+        conn.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+    }
     Ok(())
 }
 
@@ -488,6 +639,8 @@ fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Download> {
     let policy: String = row.get("duplicate_policy")?;
     let algo: Option<String> = row.get("checksum_algo")?;
     let headers: Option<String> = row.get("headers_json")?;
+    let cookies: Option<String> = row.get("cookies_json")?;
+    let credential: Option<String> = row.get("credential_id")?;
     Ok(Download {
         id: parse_uuid(row, "id")?,
         url: row.get("url")?,
@@ -508,6 +661,15 @@ fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Download> {
         user_agent: row.get("user_agent")?,
         referer: row.get("referer")?,
         headers: parse_headers(headers)?,
+        cookies: parse_headers(cookies)?,
+        proxy: row.get("proxy_json")?,
+        credential_id: match credential {
+            Some(value) => Some(Uuid::parse_str(&value).map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+            })?),
+            None => None,
+        },
+        speed_limit_bps: opt_u64_col(row, "speed_limit_bps")?,
         insecure_tls: row.get::<_, i64>("insecure_tls")? != 0,
         checksum_algo: match algo {
             Some(value) => Some(parse_algo(&value)?),
@@ -566,6 +728,33 @@ fn parse_algo(value: &str) -> rusqlite::Result<ChecksumAlgo> {
     ChecksumAlgo::parse(value).map_err(sql_convert)
 }
 
+fn json_pairs(pairs: &[(String, String)]) -> Result<Option<String>> {
+    if pairs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_string(pairs)?))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Credential {
+    pub id: Uuid,
+    pub host: String,
+    pub username: String,
+    pub keychain_id: String,
+    pub auth_scheme: String,
+}
+
+fn credential_from_row(row: &Row<'_>) -> rusqlite::Result<Credential> {
+    Ok(Credential {
+        id: parse_uuid(row, "id")?,
+        host: row.get("host")?,
+        username: row.get("username")?,
+        keychain_id: row.get("keychain_id")?,
+        auth_scheme: row.get("auth_scheme")?,
+    })
+}
+
 fn parse_headers(raw: Option<String>) -> rusqlite::Result<Vec<(String, String)>> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
@@ -616,6 +805,10 @@ mod tests {
             user_agent: Some("test".into()),
             referer: None,
             headers: vec![("X-Test".into(), "1".into())],
+            cookies: vec![("sid".into(), "1".into())],
+            proxy: None,
+            credential_id: None,
+            speed_limit_bps: None,
             insecure_tls: false,
             checksum_algo: Some(ChecksumAlgo::Sha256),
             checksum_expected: Some("abc".into()),
@@ -642,6 +835,8 @@ mod tests {
         let loaded = store.get(download.id).unwrap();
         assert_eq!(loaded.filename, "file.bin");
         assert_eq!(loaded.headers, vec![("X-Test".into(), "1".into())]);
+        assert_eq!(loaded.cookies, vec![("sid".into(), "1".into())]);
+        assert_eq!(store.setting_string("proxy_mode").unwrap().as_deref(), Some("direct"));
         assert_eq!(loaded.checksum_algo, Some(ChecksumAlgo::Sha256));
         let segment = Segment {
             id: Uuid::new_v4(),

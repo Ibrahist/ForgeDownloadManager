@@ -4,11 +4,12 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use forgedownloadmanager_core::checksum::random_token;
-use forgedownloadmanager_core::config::{EngineConfig, DEFAULT_USER_AGENT};
+use forgedownloadmanager_core::config::{self, EngineConfig, DEFAULT_USER_AGENT};
 use forgedownloadmanager_core::control::{self, interrupted_label};
-use forgedownloadmanager_core::model::{AddRequest, ChecksumAlgo, Download, DownloadStatus, DuplicatePolicy};
-use forgedownloadmanager_core::store::Store;
 use forgedownloadmanager_core::filename::ensure_direct_child;
+use forgedownloadmanager_core::model::{AddRequest, ChecksumAlgo, Download, DownloadStatus, DuplicatePolicy};
+use forgedownloadmanager_core::secrets::{KeyringSecrets, SecretStore};
+use forgedownloadmanager_core::store::Store;
 use forgedownloadmanager_core::{insert_request, Engine, EngineEvent};
 
 mod lock;
@@ -54,6 +55,21 @@ enum Command {
         /// `rename`, `overwrite`, or `ask`.
         #[arg(long)]
         duplicate: Option<String>,
+        /// Cookie pair `Name=Value`. Repeat for more than one cookie.
+        #[arg(long = "cookie")]
+        cookies: Vec<String>,
+        /// Per-download byte rate. `0` is unlimited.
+        #[arg(long)]
+        speed_limit: Option<u64>,
+        /// `direct`, `system`, or a proxy URL (`http://`, `https://`, `socks5://`).
+        #[arg(long)]
+        proxy: Option<String>,
+        /// User name for Basic, Digest, or FTP. The password is not an argument.
+        #[arg(long)]
+        user: Option<String>,
+        /// Read one password line from stdin.
+        #[arg(long)]
+        password_stdin: bool,
     },
     /// Show downloads. Does not start the engine.
     List {
@@ -69,6 +85,28 @@ enum Command {
     },
     /// Run queued downloads until the queue is idle.
     Run,
+    /// Store a password in the OS keychain. `HOST` is `host:port`, for example `example.com:443`.
+    Auth {
+        #[command(subcommand)]
+        action: AuthCommand,
+    },
+    /// Read or write one engine setting.
+    Config {
+        #[command(subcommand)]
+        action: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// `forge-dm auth set HOST USER` reads the password from stdin.
+    Set { host: String, username: String },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Get { key: String },
+    Set { key: String, value: String },
 }
 
 #[tokio::main]
@@ -112,6 +150,11 @@ async fn run(cli: Cli) -> Result<i32, String> {
             insecure_tls,
             checksum,
             duplicate,
+            cookies,
+            speed_limit,
+            proxy,
+            user,
+            password_stdin,
         } => {
             let mut request = AddRequest::new(url, dir.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))));
             request.segments = segments;
@@ -121,6 +164,15 @@ async fn run(cli: Cli) -> Result<i32, String> {
             request.user_agent = user_agent;
             request.headers = parse_headers(&headers)?;
             request.insecure_tls = insecure_tls;
+            request.cookies = parse_cookies(&cookies)?;
+            request.speed_limit_bps = speed_limit;
+            if let Some(proxy) = proxy {
+                request.proxy = Some(forgedownloadmanager_core::proxy::override_from_flag(&proxy).map_err(|err| err.to_string())?);
+            }
+            request.username = user;
+            if password_stdin {
+                request.password = Some(read_secret_line()?);
+            }
             if insecure_tls {
                 eprintln!("warning: TLS certificate verification is disabled for this download");
             }
@@ -143,6 +195,13 @@ async fn run(cli: Cli) -> Result<i32, String> {
         Command::Resume { id } => resume_cmd(&data_dir, &id).await,
         Command::Remove { id, delete_file } => remove_cmd(&data_dir, &id, delete_file).await,
         Command::Run => run_cmd(&data_dir).await,
+        Command::Auth { action } => match action {
+            AuthCommand::Set { host, username } => auth_set(&data_dir, &host, &username).await,
+        },
+        Command::Config { action } => match action {
+            ConfigCommand::Get { key } => config_get(&data_dir, &key).await,
+            ConfigCommand::Set { key, value } => config_set(&data_dir, &key, &value).await,
+        },
     }
 }
 
@@ -150,20 +209,7 @@ async fn add_offline(data_dir: &Path, request: AddRequest) -> Result<i32, String
     let _owner = match lock::attach(data_dir).map_err(|err| err.to_string())? {
         lock::Attach::Owner(owner) => owner,
         lock::Attach::Forward { addr, token } => {
-            let body = serde_json::json!({
-                "url": request.url,
-                "save_dir": request.save_dir,
-                "filename": request.filename,
-                "segments": request.segments,
-                "start": false,
-                "referer": request.referer,
-                "user_agent": request.user_agent,
-                "headers": request.headers,
-                "insecure_tls": request.insecure_tls,
-                "duplicate_policy": request.duplicate_policy,
-                "checksum_algo": request.checksum_algo,
-                "checksum_expected": request.checksum_expected,
-            });
+            let body = add_body(&request);
             let id = forward_add(addr, &token, &body.to_string()).await?;
             println!("{id}");
             return Ok(0);
@@ -172,7 +218,8 @@ async fn add_offline(data_dir: &Path, request: AddRequest) -> Result<i32, String
     let store = Store::open(&data_dir.join("forge.db")).map_err(|err| err.to_string())?;
     let segments = store.setting_u64("default_segments").map_err(|err| err.to_string())?.unwrap_or(8) as u32;
     let ua = store.setting_string("user_agent").map_err(|err| err.to_string())?.unwrap_or_else(|| DEFAULT_USER_AGENT.to_string());
-    let id = insert_request(&store, &request, segments, &ua).map_err(|err| err.to_string())?;
+    let secrets = KeyringSecrets;
+    let id = insert_request(&store, &request, segments, &ua, &secrets).map_err(|err| err.to_string())?;
     println!("{id}");
     Ok(0)
 }
@@ -180,24 +227,11 @@ async fn add_offline(data_dir: &Path, request: AddRequest) -> Result<i32, String
 async fn add_online(data_dir: &Path, request: AddRequest) -> Result<i32, String> {
     match lock::attach(data_dir).map_err(|err| err.to_string())? {
         lock::Attach::Forward { addr, token } => {
-            let body = serde_json::json!({
-                "url": request.url,
-                "save_dir": request.save_dir,
-                "filename": request.filename,
-                "segments": request.segments,
-                "start": true,
-                "referer": request.referer,
-                "user_agent": request.user_agent,
-                "headers": request.headers,
-                "insecure_tls": request.insecure_tls,
-                "duplicate_policy": request.duplicate_policy,
-                "checksum_algo": request.checksum_algo,
-                "checksum_expected": request.checksum_expected,
-            });
+            let body = add_body(&request);
             let id = forward_add(addr, &token, &body.to_string()).await?;
             println!("{id}");
             let _ = std::io::stdout().flush();
-            wait_remote(addr, &token, id).await
+            wait_remote(data_dir, addr, &token, id).await
         }
         lock::Attach::Owner(owner) => {
             let engine = open_engine(&owner).await?;
@@ -246,8 +280,27 @@ async fn resume_cmd(data_dir: &Path, id: &str) -> Result<i32, String> {
     match lock::attach(data_dir).map_err(|err| err.to_string())? {
         lock::Attach::Forward { addr, token } => {
             let resolved = remote_resolve(addr, &token, id).await?;
-            post_ok(addr, &token, &format!("/v1/downloads/{resolved}/resume"), "").await?;
-            wait_remote(addr, &token, resolved).await
+            // The owner can finish and close the listener between this post and the
+            // next poll. A refused connection after that exit is read from SQLite.
+            let started = Instant::now();
+            loop {
+                if ctrl_c_pending() {
+                    return Ok(130);
+                }
+                match post_forward(addr, &token, &format!("/v1/downloads/{resolved}/resume"), "").await {
+                    Ok(()) => return wait_remote(data_dir, addr, &token, resolved).await,
+                    Err(ForwardError::Status(err)) => return Err(err),
+                    Err(ForwardError::Unreachable(err)) => {
+                        if let Some(code) = status_after_owner_exit(data_dir, resolved)? {
+                            return Ok(code);
+                        }
+                        if started.elapsed() > Duration::from_secs(5) {
+                            return Err(err);
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
         }
         lock::Attach::Owner(owner) => {
             let engine = open_engine(&owner).await?;
@@ -389,12 +442,30 @@ async fn forward_add(addr: std::net::SocketAddr, token: &str, body: &str) -> Res
     uuid::Uuid::parse_str(id).map_err(|err| err.to_string())
 }
 
+enum ForwardError {
+    /// The listener answered with an HTTP error.
+    Status(String),
+    /// No listener accepted the connection.
+    Unreachable(String),
+}
+
 async fn post_ok(addr: std::net::SocketAddr, token: &str, path: &str, body: &str) -> Result<(), String> {
-    let (status, text) = control::control_exchange(addr, token, "POST", path, body, None, None)
-        .await
-        .map_err(|err| err.to_string())?;
+    post_forward(addr, token, path, body).await.map_err(|err| match err {
+        ForwardError::Status(text) | ForwardError::Unreachable(text) => text,
+    })
+}
+
+async fn post_forward(addr: std::net::SocketAddr, token: &str, path: &str, body: &str) -> Result<(), ForwardError> {
+    let (status, text) = match control::control_exchange(addr, token, "POST", path, body, None, None).await {
+        Ok(response) => response,
+        Err(err) => return Err(ForwardError::Unreachable(err.to_string())),
+    };
     if status >= 400 {
-        return Err(if text.is_empty() { format!("control API returned {status}") } else { text });
+        return Err(ForwardError::Status(if text.is_empty() {
+            format!("control API returned {status}")
+        } else {
+            text
+        }));
     }
     Ok(())
 }
@@ -445,21 +516,54 @@ fn ctrl_c_pending() -> bool {
     FLAG.load(Ordering::SeqCst)
 }
 
-async fn wait_remote(addr: std::net::SocketAddr, token: &str, id: uuid::Uuid) -> Result<i32, String> {
+async fn wait_remote(data_dir: &Path, addr: std::net::SocketAddr, token: &str, id: uuid::Uuid) -> Result<i32, String> {
+    // `add` closes the listener as soon as the queue is idle. The poll can land
+    // in that gap and see a refused connection for a download that already finished.
+    let mut failing_since: Option<Instant> = None;
     loop {
         if ctrl_c_pending() {
             return Ok(130);
         }
-        let rows = remote_downloads(addr, token).await?;
-        let focused = rows.iter().find(|download| download.id == id);
-        if let Some(download) = focused {
-            if matches!(download.status, DownloadStatus::Completed | DownloadStatus::Failed | DownloadStatus::Stopped)
-                && !rows.iter().any(|row| row.status.is_active())
-            {
-                return Ok(if download.status == DownloadStatus::Failed { 2 } else { 0 });
+        match remote_downloads(addr, token).await {
+            Ok(rows) => {
+                failing_since = None;
+                if let Some(code) = finished_code(&rows, id) {
+                    return Ok(code);
+                }
+            }
+            Err(err) => {
+                if let Some(code) = status_after_owner_exit(data_dir, id)? {
+                    return Ok(code);
+                }
+                let since = failing_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > Duration::from_secs(5) {
+                    return Err(err);
+                }
             }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn finished_code(rows: &[Download], id: uuid::Uuid) -> Option<i32> {
+    let download = rows.iter().find(|download| download.id == id)?;
+    if matches!(download.status, DownloadStatus::Completed | DownloadStatus::Failed | DownloadStatus::Stopped)
+        && !rows.iter().any(|row| row.status.is_active())
+    {
+        Some(if download.status == DownloadStatus::Failed { 2 } else { 0 })
+    } else {
+        None
+    }
+}
+
+/// `Some` when the supervising process has released the lock and the download is terminal.
+fn status_after_owner_exit(data_dir: &Path, id: uuid::Uuid) -> Result<Option<i32>, String> {
+    match lock::supervisor(data_dir).map_err(|err| err.to_string())? {
+        Some(_) => Ok(None),
+        None => {
+            let rows = Store::list_if_exists(&data_dir.join("forge.db")).map_err(|err| err.to_string())?;
+            Ok(finished_code(&rows, id))
+        }
     }
 }
 
@@ -499,6 +603,114 @@ fn print_downloads(rows: &[Download], json: bool, supervisor: bool) {
             total,
             download.filename
         );
+    }
+}
+
+fn add_body(request: &AddRequest) -> serde_json::Value {
+    serde_json::json!({
+        "url": request.url,
+        "save_dir": request.save_dir,
+        "filename": request.filename,
+        "segments": request.segments,
+        "start": request.start,
+        "referer": request.referer,
+        "user_agent": request.user_agent,
+        "headers": request.headers,
+        "cookies": request.cookies,
+        "proxy": request.proxy,
+        "speed_limit_bps": request.speed_limit_bps,
+        "username": request.username,
+        "password": request.password,
+        "max_retries": request.max_retries,
+        "insecure_tls": request.insecure_tls,
+        "duplicate_policy": request.duplicate_policy,
+        "checksum_algo": request.checksum_algo,
+        "checksum_expected": request.checksum_expected,
+    })
+}
+
+fn parse_cookies(cookies: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for cookie in cookies {
+        let Some((name, value)) = cookie.split_once('=') else {
+            return Err(format!("cookie `{cookie}` needs Name=Value"));
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("cookie name is empty".into());
+        }
+        out.push((name.to_string(), value.trim().to_string()));
+    }
+    Ok(out)
+}
+
+fn read_secret_line() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(|err| err.to_string())?;
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    Ok(line)
+}
+
+async fn auth_set(data_dir: &Path, host: &str, username: &str) -> Result<i32, String> {
+    let password = read_secret_line()?;
+    match lock::attach(data_dir).map_err(|err| err.to_string())? {
+        lock::Attach::Forward { addr, token } => {
+            let body = serde_json::json!({ "host": host, "username": username, "password": password }).to_string();
+            post_ok(addr, &token, "/v1/credentials", &body).await?;
+            Ok(0)
+        }
+        lock::Attach::Owner(_owner) => {
+            let store = Store::open(&data_dir.join("forge.db")).map_err(|err| err.to_string())?;
+            let credential = store.upsert_credential(host, username, "any").map_err(|err| err.to_string())?;
+            KeyringSecrets.set_secret(&credential.keychain_id, &password).map_err(|err| err.to_string())?;
+            println!("{}", credential.id);
+            Ok(0)
+        }
+    }
+}
+
+async fn config_get(data_dir: &Path, key: &str) -> Result<i32, String> {
+    if !config::SETTING_KEYS.contains(&key) {
+        return Err(format!("unknown setting {key}"));
+    }
+    match lock::attach(data_dir).map_err(|err| err.to_string())? {
+        lock::Attach::Forward { addr, token } => {
+            let (status, text) = control::control_exchange(addr, &token, "GET", &format!("/v1/settings/{key}"), "", None, None)
+                .await
+                .map_err(|err| err.to_string())?;
+            if status != 200 {
+                return Err(text);
+            }
+            println!("{text}");
+            Ok(0)
+        }
+        lock::Attach::Owner(_owner) => {
+            let store = Store::open(&data_dir.join("forge.db")).map_err(|err| err.to_string())?;
+            let value = store.setting_value(key).map_err(|err| err.to_string())?;
+            println!("{}", serde_json::to_string(&value).map_err(|err| err.to_string())?);
+            Ok(0)
+        }
+    }
+}
+
+async fn config_set(data_dir: &Path, key: &str, raw: &str) -> Result<i32, String> {
+    let value = config::parse_setting_value(key, raw).map_err(|err| err.to_string())?;
+    match lock::attach(data_dir).map_err(|err| err.to_string())? {
+        lock::Attach::Forward { addr, token } => {
+            let body = serde_json::json!({ "key": key, "value": value }).to_string();
+            post_ok(addr, &token, "/v1/settings", &body).await?;
+            Ok(0)
+        }
+        lock::Attach::Owner(_owner) => {
+            let store = Store::open(&data_dir.join("forge.db")).map_err(|err| err.to_string())?;
+            store.set_setting(key, &value).map_err(|err| err.to_string())?;
+            Ok(0)
+        }
     }
 }
 

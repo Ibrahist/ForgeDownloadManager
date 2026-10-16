@@ -1,12 +1,13 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use forgedownloadmanager_core::checksum::{self, hash_file};
 use forgedownloadmanager_core::control::{self, control_exchange};
 use forgedownloadmanager_core::model::{AddRequest, ChecksumAlgo, Download, DownloadStatus};
-use forgedownloadmanager_core::testutil::{Behavior, Mock};
+use forgedownloadmanager_core::secrets::MemorySecrets;
+use forgedownloadmanager_core::testutil::{Behavior, FtpMock, HttpProxy, Mock};
 use forgedownloadmanager_core::{Engine, EngineConfig};
 
 fn pattern(len: usize) -> Vec<u8> {
@@ -119,7 +120,14 @@ async fn disconnect_then_resume_matches_hash() {
     let mock = Mock::spawn(behavior).await;
     let dir = tempfile::tempdir().unwrap();
     let engine = engine_in(dir.path(), 2).await;
-    let first = run_until(&engine, &mock.url("/file"), &dir.path().join("save"), 2).await;
+    let mut request = AddRequest::new(mock.url("/file"), dir.path().join("save"));
+    request.segments = Some(2);
+    request.max_retries = Some(0);
+    let id = engine.add(request).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(30), engine.wait_for_terminal(id))
+        .await
+        .expect("download timed out")
+        .unwrap();
     assert_eq!(first.status, DownloadStatus::Failed, "first attempt should break");
     assert!(first.downloaded_bytes > 0, "flush should have kept a prefix");
     engine.resume(first.id).await.unwrap();
@@ -394,6 +402,175 @@ async fn control_api_rejects_bad_callers_and_pauses() {
     assert_eq!(status, 200, "{list}");
     assert!(list.contains(&id));
     stall.store(false, Ordering::Release);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dynamic_split_keeps_the_hash() {
+    let bytes = pattern(16 * 1024);
+    let mut behavior = Behavior::new(bytes.clone());
+    behavior.chunk_size = 1024;
+    behavior.slow_from = Some(8192);
+    behavior.slow_delay = Duration::from_millis(40);
+    let mock = Mock::spawn(behavior).await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(dir.path(), 2).await;
+    let download = run_until(&engine, &mock.url("/file"), &dir.path().join("save"), 2).await;
+    assert_hash(&download, &bytes);
+    assert!(download.segment_count >= 3, "segments {}", download.segment_count);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disconnect_retries_without_a_manual_resume() {
+    let bytes = pattern(80_000);
+    let mut behavior = Behavior::new(bytes.clone());
+    behavior.disconnect_after = Some(8 * 1024);
+    behavior.disconnects_left = Arc::new(AtomicUsize::new(1));
+    behavior.chunk_size = 4 * 1024;
+    let mock = Mock::spawn(behavior).await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(dir.path(), 2).await;
+    let download = run_until(&engine, &mock.url("/file"), &dir.path().join("save"), 2).await;
+    assert_hash(&download, &bytes);
+    assert!(download.retry_count > 0, "retry_count {}", download.retry_count);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rate_limit_status_retries_and_then_succeeds() {
+    let bytes = pattern(48 * 1024);
+    let mut behavior = Behavior::new(bytes.clone());
+    behavior.fail_transfers = Arc::new(AtomicUsize::new(1));
+    behavior.fail_status = 503;
+    let mock = Mock::spawn(behavior).await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(dir.path(), 2).await;
+    let download = run_until(&engine, &mock.url("/file"), &dir.path().join("save"), 2).await;
+    assert_hash(&download, &bytes);
+    assert!(download.retry_count > 0, "retry_count {}", download.retry_count);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expired_link_is_not_retried() {
+    for status in [403u16, 410] {
+        let mut behavior = Behavior::new(pattern(1024));
+        behavior.force_status = Some(status);
+        let mock = Mock::spawn(behavior).await;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path(), 1).await;
+        let download = run_until(&engine, &mock.url("/file"), &dir.path().join("save"), 1).await;
+        assert_eq!(download.status, DownloadStatus::Failed, "{status}");
+        assert_eq!(download.error_code.as_deref(), Some("link_expired"));
+        assert_eq!(download.retry_count, 0);
+        let gets = mock.requests.lock().unwrap().iter().filter(|line| line.starts_with("GET")).count();
+        assert!(gets <= 1, "status {status} issued {gets} GETs");
+        engine.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_speed_limit_slows_a_small_file() {
+    let bytes = vec![7u8; 64 * 1024];
+    let mock = Mock::spawn(Behavior::new(bytes.clone())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = EngineConfig::new(dir.path().join("forge.db"));
+    cfg.min_segment_bytes = Some(1024);
+    cfg.speed_limit_bps = Some(64 * 1024);
+    cfg.flush_interval = Duration::from_millis(200);
+    let engine = Engine::open(cfg).await.unwrap();
+    let started = Instant::now();
+    let download = run_until(&engine, &mock.url("/file"), &dir.path().join("save"), 1).await;
+    let elapsed = started.elapsed();
+    assert_hash(&download, &bytes);
+    assert!(elapsed >= Duration::from_millis(700), "elapsed {elapsed:?}");
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cookie_is_sent_and_basic_secret_stays_out_of_sqlite() {
+    let bytes = pattern(4096);
+    let mut behavior = Behavior::new(bytes.clone());
+    behavior.require_basic = Some(("aladdin".into(), "opensesame".into()));
+    let mock = Mock::spawn(behavior).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = EngineConfig::new(dir.path().join("forge.db"));
+    cfg.min_segment_bytes = Some(1024);
+    cfg.secrets = Some(Arc::new(MemorySecrets::new()));
+    let engine = Engine::open(cfg).await.unwrap();
+    let mut request = AddRequest::new(mock.url("/file"), dir.path().join("save"));
+    request.segments = Some(1);
+    request.cookies = vec![("sid".into(), "abc".into())];
+    request.username = Some("aladdin".into());
+    request.password = Some("opensesame".into());
+    let id = engine.add(request).await.unwrap();
+    let download = tokio::time::timeout(Duration::from_secs(30), engine.wait_for_terminal(id))
+        .await
+        .expect("download timed out")
+        .unwrap();
+    assert_hash(&download, &bytes);
+    let log = mock.requests.lock().unwrap().clone();
+    assert!(log.iter().any(|line| line == "cookie:sid=abc"), "{log:?}");
+    engine.shutdown().await;
+    let db = std::fs::read(dir.path().join("forge.db")).unwrap();
+    assert!(!db.windows(b"opensesame".len()).any(|window| window == b"opensesame"));
+    if let Ok(wal) = std::fs::read(dir.path().join("forge.db-wal")) {
+        assert!(!wal.windows(b"opensesame".len()).any(|window| window == b"opensesame"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_proxy_relays_the_absolute_form() {
+    let bytes = pattern(6000);
+    let origin = Mock::spawn(Behavior::new(bytes.clone())).await;
+    let proxy = HttpProxy::spawn().await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(dir.path(), 1).await;
+    let mut request = AddRequest::new(origin.url("/file"), dir.path().join("save"));
+    request.segments = Some(1);
+    request.proxy = Some(
+        forgedownloadmanager_core::proxy::override_from_flag(&format!("http://127.0.0.1:{}", proxy.addr.port())).unwrap(),
+    );
+    let id = engine.add(request).await.unwrap();
+    let download = tokio::time::timeout(Duration::from_secs(30), engine.wait_for_terminal(id))
+        .await
+        .expect("download timed out")
+        .unwrap();
+    assert_hash(&download, &bytes);
+    assert!(proxy.hits.load(Ordering::Acquire) > 0);
+    engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ftp_download_and_rest_resume_match_the_hash() {
+    let bytes = pattern(20_000);
+    let ftp = FtpMock::spawn(bytes.clone(), 0).await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(dir.path(), 1).await;
+    let download = run_until(&engine, &ftp.url(), &dir.path().join("save"), 4).await;
+    assert_hash(&download, &bytes);
+    assert_eq!(download.segment_count, 1);
+    engine.shutdown().await;
+
+    let cut = FtpMock::spawn(bytes.clone(), 1).await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(dir.path(), 1).await;
+    let mut request = AddRequest::new(cut.url(), dir.path().join("save"));
+    request.max_retries = Some(0);
+    let id = engine.add(request).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(20), engine.wait_for_terminal(id))
+        .await
+        .expect("ftp attempt timed out")
+        .unwrap();
+    assert_eq!(first.status, DownloadStatus::Failed, "{:?}", first.error_message);
+    assert!(first.downloaded_bytes > 0, "REST resume needs a stored cursor");
+    engine.resume(id).await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(20), engine.wait_for_terminal(id))
+        .await
+        .expect("ftp resume timed out")
+        .unwrap();
+    assert_hash(&second, &bytes);
     engine.shutdown().await;
 }
 

@@ -1,6 +1,6 @@
 # Forge Download Manager — Architecture
 
-Status: **accepted**. Phase 1 implements the cut line in section 10.
+Status: **accepted**. Phase 1's cut line is section 10. Phase 2 adds dynamic split, retries, proxies, authentication, cookies, FTP/FTPS, and bandwidth limits.
 
 License target: **MIT**. Original UI and naming. No proprietary download-manager code, icons, or branding.
 
@@ -320,6 +320,8 @@ In scope:
 
 Out of scope until later phases: dynamic split, retry policy, proxy, auth, cookies, FTP, limiter, queues beyond the seeded Default queue, UI, extension, HLS, installers.
 
+Phase 2 has since landed dynamic split, the retry policy, proxy, auth, cookies, an in-tree FTP/FTPS client, and the bandwidth limiter. Still later: queues beyond Default, the UI, the extension, the site grabber, HLS, installers, SFTP, and a Linux OS keychain.
+
 Definition of done: `cargo test --workspace` passes, and a manual `forge-dm add` of a range-capable file pauses, resumes, and matches the source hash.
 
 ## 11. Planned dependencies and licenses
@@ -328,7 +330,7 @@ Runtime (Phase 1): tokio, tokio-util, reqwest (rustls, stream), rusqlite (bundle
 
 Dev: proptest, tempfile. MIT or Apache-2.0.
 
-Later, still permissive: keyring, tauri 2, React, Tailwind, i18next. FTP client crate will be checked for license before it is added. `webextension-polyfill` is MPL-2.0 and will not be used; the extension will call `chrome.*` directly with a tiny `browser` shim.
+Phase 2 also uses keyring 3 on Windows and macOS only (`windows-native` / `apple-native`), base64, rustls-platform-verifier, and tokio-rustls with default features off (`ring`, `tls12`). FTP/FTPS is in-tree and does not add a crate. Linux does not enable keyring's secret-service features. Later, still permissive: tauri 2, React, Tailwind, i18next. `webextension-polyfill` is MPL-2.0 and will not be used; the extension will call `chrome.*` directly with a tiny `browser` shim.
 
 Anything outside MIT, Apache-2.0, BSD, ISC, or public domain is not added without asking.
 

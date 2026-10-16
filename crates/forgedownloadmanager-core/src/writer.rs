@@ -26,19 +26,14 @@ impl SegmentFile {
         Ok(Self { inner: Arc::new(Mutex::new(file)) })
     }
 
-    pub async fn write_at(&self, offset: u64, data: &[u8]) -> Result<()> {
+    pub fn write_at_blocking(&self, offset: u64, data: &[u8]) -> Result<()> {
         if data.is_empty() {
             return Ok(());
         }
-        let inner = Arc::clone(&self.inner);
-        let data = data.to_vec();
-        tokio::task::spawn_blocking(move || {
-            let mut file = inner.lock().unwrap_or_else(|err| err.into_inner());
-            file.seek(SeekFrom::Start(offset))?;
-            file.write_all(&data)?;
-            Ok(())
-        })
-        .await?
+        let mut file = self.inner.lock().unwrap_or_else(|err| err.into_inner());
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(data)?;
+        Ok(())
     }
 
     pub fn sync(&self) -> Result<()> {

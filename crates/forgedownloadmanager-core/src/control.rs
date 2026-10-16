@@ -122,7 +122,25 @@ async fn dispatch(engine: &Engine, token: &str, peer: SocketAddr, port: u16, req
             },
             Err(err) => error_response(&err),
         },
+        ("GET", path) if setting_key(path).is_some() => match setting_key(path) {
+            Some(key) => match engine.setting_value(key) {
+                Ok(value) => match serde_json::to_string(&value) {
+                    Ok(body) => rawhttp::json_response(200, &body),
+                    Err(err) => error_response(&Error::Json(err)),
+                },
+                Err(err) => error_response(&err),
+            },
+            None => rawhttp::json_response(404, &json_err("not_found", "unknown route")),
+        },
         ("POST", "/v1/downloads") => match add_download(engine, &request.body).await {
+            Ok(id) => rawhttp::json_response(200, &format!(r#"{{"id":"{id}"}}"#)),
+            Err(err) => error_response(&err),
+        },
+        ("POST", "/v1/settings") => match set_setting(engine, &request.body) {
+            Ok(()) => rawhttp::json_response(200, r#"{"ok":true}"#),
+            Err(err) => error_response(&err),
+        },
+        ("POST", "/v1/credentials") => match save_credential(engine, &request.body) {
             Ok(id) => rawhttp::json_response(200, &format!(r#"{{"id":"{id}"}}"#)),
             Err(err) => error_response(&err),
         },
@@ -195,7 +213,32 @@ async fn add_download(engine: &Engine, body: &[u8]) -> Result<Uuid> {
     }
     request.checksum_algo = parsed.checksum_algo;
     request.checksum_expected = parsed.checksum_expected;
+    request.cookies = parsed.cookies;
+    request.proxy = parsed.proxy;
+    request.speed_limit_bps = parsed.speed_limit_bps;
+    request.username = parsed.username;
+    request.password = parsed.password;
+    request.max_retries = parsed.max_retries;
     engine.add(request).await
+}
+
+fn set_setting(engine: &Engine, body: &[u8]) -> Result<()> {
+    let parsed: SettingBody = serde_json::from_slice(body)?;
+    engine.set_setting(&parsed.key, &parsed.value)
+}
+
+fn save_credential(engine: &Engine, body: &[u8]) -> Result<Uuid> {
+    let parsed: CredentialBody = serde_json::from_slice(body)?;
+    engine.save_credential(&parsed.host, &parsed.username, &parsed.password)
+}
+
+fn setting_key(path: &str) -> Option<&str> {
+    let key = path.strip_prefix("/v1/settings/")?;
+    if key.is_empty() || key.contains('/') {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 #[derive(Deserialize)]
@@ -214,6 +257,26 @@ struct AddBody {
     duplicate_policy: Option<DuplicatePolicy>,
     checksum_algo: Option<ChecksumAlgo>,
     checksum_expected: Option<String>,
+    #[serde(default)]
+    cookies: Vec<(String, String)>,
+    proxy: Option<String>,
+    speed_limit_bps: Option<u64>,
+    username: Option<String>,
+    password: Option<String>,
+    max_retries: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct SettingBody {
+    key: String,
+    value: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct CredentialBody {
+    host: String,
+    username: String,
+    password: String,
 }
 
 #[derive(Deserialize)]
