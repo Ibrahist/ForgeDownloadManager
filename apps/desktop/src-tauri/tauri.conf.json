@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Forge Download Manager",
+  "version": "0.1.0",
+  "identifier": "com.forgedownloadmanager.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev --prefix ..",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build --prefix ..",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Forge Download Manager",
+        "width": 1120,
+        "height": 740,
+        "minWidth": 800,
+        "minHeight": 520
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}

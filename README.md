@@ -1,6 +1,6 @@
 # Forge Download Manager
 
-Forge Download Manager is an open-source, cross-platform download manager. The Rust library and the `forge-dm` command do segmented HTTP(S) and FTP/FTPS downloads, pause and resume, retries, proxies, keychain auth, cookies, bandwidth limits, and SQLite crash recovery.
+Forge Download Manager is an open-source, cross-platform download manager. The Rust library, the `forge-dm` command, and the desktop window do segmented HTTP(S) and FTP/FTPS downloads, pause and resume, retries, proxies, keychain auth, cookies, bandwidth limits, and SQLite crash recovery.
 
 The license is MIT. This tree does not copy proprietary download-manager code, icons, or branding. There is no telemetry.
 
@@ -16,6 +16,28 @@ cargo run -p forgedownloadmanager-cli -- add https://example.com/file.bin
 ```
 
 On Windows, that command uses the MSVC linker and the Windows SDK. A machine without them can use the GNU toolchain instead: install a MinGW `gcc` on `PATH`, then run `cargo +stable-x86_64-pc-windows-gnu test --workspace`. GitHub Actions uses the Windows runner's MSVC tools.
+
+## Desktop
+
+The window lives in `apps/desktop` and is its own Cargo workspace, so the command above does not compile the WebView. That crate needs Rust 1.90 or newer because it links Tauri 2.12. The engine and CLI stay on Rust 1.89.
+
+```bash
+cd apps/desktop
+npm ci
+npm test
+npm run dev
+npm run tauri dev
+```
+
+`npm run dev` shows the interface only. Downloads run inside `npm run tauri dev`, which starts `forge-dm-desktop`. A release-style compile, after `npm run build` in `apps/desktop`, is:
+
+```bash
+cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
+```
+
+When this process wins `engine.lock`, it embeds the engine and serves the loopback HTTP API until it exits, including while the queue is idle. Closing the window leaves downloads running. The next launch requeues rows that were still downloading. If another process already holds the lock, the window forwards commands to it and refreshes the list about twice a second.
+
+A Windows GNU link can print `multiple non-default manifests` while merging the resource section. The binary still links. CI uses the MSVC linker. GitHub Actions builds the shell on Ubuntu, Windows, and macOS. It does not produce installers.
 
 The binary name is `forge-dm`. Data is stored in `%LOCALAPPDATA%\ForgeDownloadManager` on Windows, `~/Library/Application Support/ForgeDownloadManager` on macOS, or `$XDG_DATA_HOME/forgedownloadmanager` on Linux. `FORGE_DM_DATA` or `--data-dir` overrides that path.
 
@@ -45,11 +67,12 @@ A second `forge-dm` process does not open the database. It forwards to the loopb
 
 - `crates/forgedownloadmanager-core` — engine
 - `crates/forgedownloadmanager-cli` — `forge-dm`
-- `apps/desktop` and `apps/extension` — later phases
+- `apps/desktop` — Tauri 2 + React window (`forge-dm-desktop`)
+- `apps/extension` — later phase
 - `ARCHITECTURE.md` — schema and phase plan
 
 ## Not in this phase
 
-The desktop UI, the browser extension, queues and schedules beyond the seeded Default queue, the site grabber, HLS/DASH, installers, and SFTP. Linux builds do not use an OS keychain: the secret-service backend depends on dbus (AFL/GPL), which this MIT app does not link. See `ARCHITECTURE.md`.
+The browser extension, queues and schedules beyond the seeded Default queue, the site grabber, HLS/DASH, installers, and SFTP. Linux builds do not use an OS keychain: the secret-service backend depends on dbus (AFL/GPL), which this MIT app does not link. See `ARCHITECTURE.md`.
 
 Third-party licenses are listed in `docs/THIRD_PARTY.md`.

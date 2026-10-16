@@ -50,6 +50,16 @@ pub enum Error {
     Join(#[from] tokio::task::JoinError),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Error;
+
+    #[test]
+    fn duplicate_ask_has_its_own_code() {
+        assert_eq!(Error::DuplicateAsk.code(), "duplicate_ask");
+    }
+}
+
 impl Error {
     /// Stable code persisted on the download row.
     pub fn code(&self) -> &'static str {
@@ -62,6 +72,7 @@ impl Error {
             Error::Io(_) | Error::PathEscape => "io",
             Error::Incomplete | Error::HttpClient(_) | Error::Http { .. } | Error::RateLimited { .. } => "network",
             Error::Cancelled => "cancelled",
+            Error::DuplicateAsk => "duplicate_ask",
             _ => "failed",
         }
     }

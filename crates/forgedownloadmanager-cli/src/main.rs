@@ -734,29 +734,5 @@ fn parse_checksum(value: &str) -> Result<(ChecksumAlgo, String), String> {
 }
 
 fn default_data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("FORGE_DM_DATA") {
-        return PathBuf::from(dir);
-    }
-    #[cfg(windows)]
-    {
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            return PathBuf::from(local).join("ForgeDownloadManager");
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/ForgeDownloadManager");
-        }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-            return PathBuf::from(xdg).join("forgedownloadmanager");
-        }
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(".local/share/forgedownloadmanager");
-        }
-    }
-    PathBuf::from("forgedownloadmanager-data")
+    lock::data_dir()
 }

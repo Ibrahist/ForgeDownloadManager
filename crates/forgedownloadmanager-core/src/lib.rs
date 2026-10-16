@@ -1,7 +1,8 @@
 //! Segmented download engine.
 //!
 //! Phase 2 adds dynamic splitting, retries, proxies, keychain authentication,
-//! cookies, a bandwidth limiter, and FTP/FTPS. The desktop UI is a later phase.
+//! cookies, a bandwidth limiter, and FTP/FTPS. Phase 3's desktop shell links
+//! this crate in-process and shares [`lock`] with the CLI.
 
 pub mod auth;
 pub mod checksum;
@@ -11,6 +12,7 @@ pub mod error;
 pub mod events;
 pub mod filename;
 pub mod limiter;
+pub mod lock;
 pub mod model;
 pub mod probe;
 pub mod proxy;

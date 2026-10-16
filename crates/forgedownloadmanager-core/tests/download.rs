@@ -401,6 +401,25 @@ async fn control_api_rejects_bad_callers_and_pauses() {
     let (status, list) = control_exchange(addr, &token, "GET", "/v1/downloads", "", None, None).await.unwrap();
     assert_eq!(status, 200, "{list}");
     assert!(list.contains(&id));
+    let (status, segments) =
+        control_exchange(addr, &token, "GET", &format!("/v1/downloads/{id}/segments"), "", None, None)
+            .await
+            .unwrap();
+    assert_eq!(status, 200, "{segments}");
+    let parsed: serde_json::Value = serde_json::from_str(&segments).unwrap();
+    assert!(parsed.is_array(), "{segments}");
+    let (status, _) = control_exchange(
+        addr,
+        &token,
+        "GET",
+        "/v1/downloads/00000000-0000-4000-8000-000000000099/segments",
+        "",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, 404);
     stall.store(false, Ordering::Release);
     engine.shutdown().await;
 }

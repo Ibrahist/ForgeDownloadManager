@@ -212,6 +212,25 @@ impl Engine {
         Ok(rows)
     }
 
+    /// Persisted segments, with in-memory cursor and end overlaid while the job is running.
+    /// After pause the job leaves the map, so the returned cursors are the last flush.
+    pub fn segments(&self, id: Uuid) -> Result<Vec<Segment>> {
+        let mut rows = self.with_store(|store| store.segments_for(id))?;
+        let jobs = lock(&self.shared.jobs);
+        if let Some(job) = jobs.get(&id) {
+            let live = lock(&job.segments);
+            for row in &mut rows {
+                if let Some(segment) = live.iter().find(|segment| segment.id == row.id) {
+                    row.cursor_byte = segment.cursor.load(Ordering::Acquire);
+                    if let Some(end) = segment.live_end() {
+                        row.end_byte = Some(end);
+                    }
+                }
+            }
+        }
+        Ok(rows)
+    }
+
     pub fn get(&self, id: Uuid) -> Result<Download> {
         self.list()?.into_iter().find(|download| download.id == id).ok_or(Error::NotFound(id))
     }

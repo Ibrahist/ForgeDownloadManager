@@ -1,6 +1,6 @@
 # Forge Download Manager — Architecture
 
-Status: **accepted**. Phase 1's cut line is section 10. Phase 2 adds dynamic split, retries, proxies, authentication, cookies, FTP/FTPS, and bandwidth limits.
+Status: **accepted**. Phase 1's cut line is section 10. Phase 2 adds dynamic split, retries, proxies, authentication, cookies, FTP/FTPS, and bandwidth limits. Phase 3 adds the desktop shell. That process embeds the engine, holds `engine.lock`, and serves the existing HTTP control API.
 
 License target: **MIT**. Original UI and naming. No proprietary download-manager code, icons, or branding.
 
@@ -19,7 +19,7 @@ $XDG_DATA_HOME/forgedownloadmanager/        (Linux)
   partials/         optional; default is the user-chosen save directory
 ```
 
-Startup takes `engine.lock` with an exclusive create. The winner opens the database and, from Phase 3 on, listens on `127.0.0.1:<random>` (WebSocket + a small HTTP control API). The token is 256 bits, stored only in the lock file (mode 0600).
+Startup takes `engine.lock` with an exclusive create. The winner opens the database and listens on `127.0.0.1:<random>` with the HTTP control API. The token is 256 bits, stored only in the lock file (mode 0600). The Phase 3 desktop process is that owner and leaves the listener up until it exits, including while the queue is idle. The extension's loopback WebSocket, described below, is Phase 5.
 
 If the lock is already held, the CLI does not open the database. It forwards commands to the loopback API. Two writers never download the same job.
 
@@ -287,9 +287,15 @@ Limits: `max_concurrent_downloads` default 3. `per_host_connections` default 16,
 
 TLS verification is on. `insecure_tls` is stored per download and the CLI requires an explicit flag. The desktop UI shows a warning before that flag is set.
 
-## 9. Desktop, extension, media (later phases)
+## 9. Desktop, extension, media
 
-Desktop (Phase 3) embeds the engine. Tauri commands are thin wrappers (`add`, `pause`, `resume`, `remove`, `list`, `set_settings`). The React UI subscribes to the same event enum, throttled again if the window is in the background. The main list is virtualized. The details panel reads `segments[]` for the map and keeps a short ring buffer for the speed graph.
+Phase 3 landed the desktop shell in `apps/desktop`. It is a separate Cargo workspace (`forge-dm-desktop`, identifier `com.forgedownloadmanager.desktop`) so root `cargo test --workspace` does not compile the WebView. Tauri commands are thin wrappers (`add`, `pause`, `resume`, `remove`, `list`, settings, segments, and the default save directory). The React UI subscribes to the same event enum when this process owns the engine, and throttles progress again while the document is hidden. The main list is virtualized. The details panel reads `segments[]` for the map and keeps a 48-sample ring buffer for the speed graph. English strings live in `apps/desktop/src/locales/en.json`.
+
+The owner serves the existing HTTP control API and leaves it up while the queue is idle, so `forge-dm` can forward. Closing the window leaves downloads running. The next open requeues rows that were still downloading, which is the recovery `Engine::open` already performs. If the lock is already held, the shell forwards over HTTP and polls `GET /v1/downloads` about every 500ms. This phase has no WebSocket.
+
+`insecure_tls` stays off until the user confirms a warning. Duplicate policy `ask` opens a prompt and retries the add as rename or overwrite. The CLI still treats `ask` as an error. `npm run dev` outside the shell draws the interface and does not start downloads.
+
+Tauri is 2.12.4 and tauri-build is 2.7.3. The desktop crate's rust-version is 1.90. The root workspace stays on 1.89. The Tauri `dbus` feature is off. The window uses system fonts and an original anvil mark.
 
 Extension (Phase 5) permissions, each for one reason:
 
@@ -320,7 +326,7 @@ In scope:
 
 Out of scope until later phases: dynamic split, retry policy, proxy, auth, cookies, FTP, limiter, queues beyond the seeded Default queue, UI, extension, HLS, installers.
 
-Phase 2 has since landed dynamic split, the retry policy, proxy, auth, cookies, an in-tree FTP/FTPS client, and the bandwidth limiter. Still later: queues beyond Default, the UI, the extension, the site grabber, HLS, installers, SFTP, and a Linux OS keychain.
+Phase 2 has since landed dynamic split, the retry policy, proxy, auth, cookies, an in-tree FTP/FTPS client, and the bandwidth limiter. Phase 3 has since landed the desktop shell in section 9. Still later: queues beyond Default, the extension, the site grabber, HLS, installers, SFTP, and a Linux OS keychain.
 
 Definition of done: `cargo test --workspace` passes, and a manual `forge-dm add` of a range-capable file pauses, resumes, and matches the source hash.
 
@@ -330,7 +336,11 @@ Runtime (Phase 1): tokio, tokio-util, reqwest (rustls, stream), rusqlite (bundle
 
 Dev: proptest, tempfile. MIT or Apache-2.0.
 
-Phase 2 also uses keyring 3 on Windows and macOS only (`windows-native` / `apple-native`), base64, rustls-platform-verifier, and tokio-rustls with default features off (`ring`, `tls12`). FTP/FTPS is in-tree and does not add a crate. Linux does not enable keyring's secret-service features. Later, still permissive: tauri 2, React, Tailwind, i18next. `webextension-polyfill` is MPL-2.0 and will not be used; the extension will call `chrome.*` directly with a tiny `browser` shim.
+Phase 2 also uses keyring 3 on Windows and macOS only (`windows-native` / `apple-native`), base64, rustls-platform-verifier, and tokio-rustls with default features off (`ring`, `tls12`). FTP/FTPS is in-tree and does not add a crate. Linux does not enable keyring's secret-service features.
+
+Phase 3 links tauri 2.12.4 and tauri-build 2.7.3 (Apache-2.0 OR MIT). The Tauri `dbus` feature is off. The UI is React 19, Tailwind CSS 4, and i18next, English only. `webextension-polyfill` is MPL-2.0 and will not be used; the extension will call `chrome.*` directly with a tiny `browser` shim.
+
+Tauri and Tailwind pull in MPL-2.0 libraries that this repo does not name as direct dependencies. Tauri's `dom_query` brings `cssparser` and `selectors`. Tauri's `dirs` brings `option-ext`. Tailwind 4 brings `lightningcss`. `docs/THIRD_PARTY.md` lists them. On Linux the shell also loads the system WebKitGTK library at runtime. That library is LGPL and is not vendored.
 
 Anything outside MIT, Apache-2.0, BSD, ISC, or public domain is not added without asking.
 

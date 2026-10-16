@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI", "Cantarell", "Helvetica Neue", sans-serif;
+  --color-ink: #1c1612;
+  --color-ink-soft: #3c322b;
+  --color-paper: #f3eee6;
+  --color-paper-2: #e6ddd0;
+  --color-stone: #8d7d6c;
+  --color-copper: #b5683d;
+  --color-copper-deep: #8a4522;
+  --color-line: #d5c9b8;
+  --color-danger: #8d2e2e;
+  --color-ok: #2c6a45;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-copper);
+  outline-offset: 2px;
+}

@@ -132,6 +132,13 @@ async fn dispatch(engine: &Engine, token: &str, peer: SocketAddr, port: u16, req
             },
             None => rawhttp::json_response(404, &json_err("not_found", "unknown route")),
         },
+        ("GET", path) if segments_path(path).is_some() => match segments_path(path) {
+            Some(id) => match load_segments(engine, id) {
+                Ok(body) => rawhttp::json_response(200, &body),
+                Err(err) => error_response(&err),
+            },
+            None => rawhttp::json_response(404, &json_err("not_found", "unknown route")),
+        },
         ("POST", "/v1/downloads") => match add_download(engine, &request.body).await {
             Ok(id) => rawhttp::json_response(200, &format!(r#"{{"id":"{id}"}}"#)),
             Err(err) => error_response(&err),
@@ -230,6 +237,21 @@ fn set_setting(engine: &Engine, body: &[u8]) -> Result<()> {
 fn save_credential(engine: &Engine, body: &[u8]) -> Result<Uuid> {
     let parsed: CredentialBody = serde_json::from_slice(body)?;
     engine.save_credential(&parsed.host, &parsed.username, &parsed.password)
+}
+
+fn segments_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1/downloads/")?;
+    let (id, action) = rest.split_once('/')?;
+    if action == "segments" && !id.is_empty() && !id.contains('/') {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+fn load_segments(engine: &Engine, id: &str) -> Result<String> {
+    let id = engine.resolve(id)?;
+    Ok(serde_json::to_string(&engine.segments(id)?)?)
 }
 
 fn setting_key(path: &str) -> Option<&str> {
