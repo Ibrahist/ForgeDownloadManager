@@ -26,11 +26,47 @@
   },
   "bundle": {
     "active": true,
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "copyright": "Copyright © 2026 Forge Download Manager contributors",
+    "category": "Network",
+    "shortDescription": "Fast, resilient, multi-segmented download manager",
+    "longDescription": "Forge Download Manager is an open-source, resilient download manager with dynamic connection splitting, media stream extraction, queue scheduling, and browser integration.",
+    "windows": {
+      "nsis": {
+        "installMode": "both",
+        "languages": ["en-US"],
+        "displayLanguageSelector": false
+      },
+      "wix": {
+        "language": "en-US"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "dmg": {
+        "windowSize": {
+          "width": 600,
+          "height": 400
+        }
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37",
+          "libxdo3"
+        ],
+        "section": "net"
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
   }
 }
