@@ -1,6 +1,10 @@
 # Forge Download Manager
 
+<<<<<<< HEAD
 **An open-source, cross-platform download manager built in Rust.**
+=======
+**[An open-source, cross-platform download manager built in Rust]**
+>>>>>>> 546169a505787fd9c04bd0e69f002ae6c6cdfff7
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.89%2B-orange)
@@ -144,11 +148,19 @@ forge-dm list --json
 
 ## Data Storage
 
+<<<<<<< HEAD
 | Platform | Location                                             |
 | -------- | ---------------------------------------------------- |
 | Windows  | `%LOCALAPPDATA%\ForgeDownloadManager`                |
 | macOS    | `~/Library/Application Support/ForgeDownloadManager` |
 | Linux    | `$XDG_DATA_HOME/forgedownloadmanager`                |
+=======
+| Platform | Location |
+| -------- | -------- |
+| Windows  | `%LOCALAPPDATA%\ForgeDownloadManager` |
+| macOS    | `~/Library/Application Support/ForgeDownloadManager` |
+| Linux    | `$XDG_DATA_HOME/forgedownloadmanager` |
+>>>>>>> 546169a505787fd9c04bd0e69f002ae6c6cdfff7
 
 Override with the `FORGE_DM_DATA` environment variable or the `--data-dir` flag. The directory contains `forge.db` (SQLite, WAL mode) and `engine.lock` (PID, API port, and auth token).
 
@@ -160,7 +172,10 @@ Override with the `FORGE_DM_DATA` environment variable or the `--data-dir` flag.
 - **Persist:** state is committed to SQLite at least once per second, so a crash re-downloads at most a short suffix and never leaves a believed-complete hole.
 - **Security:** the control API listens on loopback only, requires a 256-bit bearer token, and rejects browser `Origin` headers. TLS verification is on by default.
 
+<<<<<<< HEAD
 For installation options, automated setup scripts, and platform installers, see [docs/INSTALL.md](docs/INSTALL.md).
+=======
+>>>>>>> 546169a505787fd9c04bd0e69f002ae6c6cdfff7
 For the full design, database schema, state machine, and phase plan, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Roadmap
@@ -168,10 +183,17 @@ For the full design, database schema, state machine, and phase plan, see [ARCHIT
 - [x] **Phase 1:** core engine, segmented downloads, pause/resume, SQLite recovery, CLI
 - [x] **Phase 2:** dynamic split, retries, proxies, authentication, cookies, FTP/FTPS, bandwidth limiter
 - [x] **Phase 3:** desktop shell (Tauri 2 + React)
+<<<<<<< HEAD
 - [x] **Phase 4:** queues and schedules beyond the default queue, site grabber
 - [x] **Phase 5:** browser extension (Manifest V3, Native Messaging)
 - [x] **Phase 6:** HLS/DASH media downloads, ffmpeg remux, optional yt-dlp plugin
 - [x] **Phase 7:** installers
+=======
+- [ ] **Phase 4:** queues and schedules beyond the default queue, site grabber
+- [ ] **Phase 5:** browser extension (Manifest V3, Native Messaging)
+- [ ] **Phase 6:** HLS/DASH media downloads, ffmpeg remux, optional yt-dlp plugin
+- [ ] **Phase 7:** installers
+>>>>>>> 546169a505787fd9c04bd0e69f002ae6c6cdfff7
 - [ ] SFTP and a Linux OS keychain backend (the secret-service backend depends on dbus, whose license is incompatible with this MIT app)
 
 ## Contributing
