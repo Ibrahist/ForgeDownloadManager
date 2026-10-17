@@ -1,6 +1,6 @@
 # Forge Download Manager
 
-**An open-source, cross-platform download manager built in Rust.**
+**[An open-source, cross-platform download manager built in Rust]**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Rust](https://img.shields.io/badge/Rust-1.89%2B-orange)
