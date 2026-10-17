@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Forge Download Manager — Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="settings-wrapper">
+    <!-- Sidebar / Header -->
+    <header class="settings-header">
+      <div class="brand">
+        <svg class="brand-icon" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 6h16l-2 5H6L4 6z"></path>
+          <path d="M6 11v7a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-7"></path>
+          <line x1="12" y1="14" x2="12" y2="17"></line>
+        </svg>
+        <div>
+          <h1>Forge Settings</h1>
+          <p class="subtitle">Browser Companion Configuration & Diagnostic</p>
+        </div>
+      </div>
+      <div id="saveFeedback" class="save-feedback">Saved successfully</div>
+    </header>
+
+    <div class="settings-grid">
+      <!-- Section 1: Interception Rules -->
+      <section class="settings-card">
+        <h2>Download Interception</h2>
+        <p class="card-desc">Control how and when browser downloads are captured by Forge.</p>
+
+        <div class="form-row">
+          <div class="label-col">
+            <label for="optInterception">Enable Interception</label>
+            <span class="hint">Intercept matching downloads from web pages</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="optInterception" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <div class="label-col">
+            <label for="optAltBypass">Alt Key Bypass</label>
+            <span class="hint">Holding the Alt key while clicking allows natural browser download</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="optAltBypass" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <div class="label-col">
+            <label for="optMinSize">Minimum File Size (KB)</label>
+            <span class="hint">Only intercept files larger than this size (0 = all files)</span>
+          </div>
+          <input type="number" id="optMinSize" min="0" step="50" value="0" class="num-input">
+        </div>
+      </section>
+
+      <!-- Section 2: File Types -->
+      <section class="settings-card">
+        <h2>File Types</h2>
+        <p class="card-desc">File extensions that should be automatically sent to Forge.</p>
+
+        <div class="preset-row">
+          <span class="preset-label">Presets:</span>
+          <button class="chip-btn" id="presetDefault">Default</button>
+          <button class="chip-btn" id="presetMedia">Media Only</button>
+          <button class="chip-btn" id="presetArchives">Archives Only</button>
+          <button class="chip-btn" id="presetAll">All Common</button>
+        </div>
+
+        <textarea id="optExtensions" rows="4" placeholder="zip, rar, 7z, tar, iso, exe, mp4..."></textarea>
+        <span class="hint">Separate extensions with spaces or commas.</span>
+      </section>
+
+      <!-- Section 3: Site Rules -->
+      <section class="settings-card">
+        <h2>Site Rules</h2>
+        <p class="card-desc">Force interception or exclude specific domains (supports wildcards e.g. *.github.com).</p>
+
+        <div class="add-rule-form">
+          <input type="text" id="newRulePattern" placeholder="Domain (e.g. *.example.com or mega.nz)">
+          <select id="newRuleAction">
+            <option value="intercept">Intercept (Always Download with Forge)</option>
+            <option value="exclude">Exclude (Never Download with Forge)</option>
+          </select>
+          <button id="addRuleBtn" class="primary-btn">Add Rule</button>
+        </div>
+
+        <div class="table-container">
+          <table class="rules-table">
+            <thead>
+              <tr>
+                <th>Domain Pattern</th>
+                <th>Action</th>
+                <th style="width: 70px;">Remove</th>
+              </tr>
+            </thead>
+            <tbody id="rulesTableBody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Section 4: Native Host Diagnostic -->
+      <section class="settings-card">
+        <h2>Desktop Host Connection</h2>
+        <p class="card-desc">Forge extension communicates with the engine via the Native Messaging host.</p>
+
+        <div class="diagnostic-box">
+          <div class="diagnostic-row">
+            <span class="diag-label">Host Status:</span>
+            <span id="diagStatus" class="diag-val">Checking...</span>
+          </div>
+          <div class="diagnostic-row">
+            <span class="diag-label">Engine Port:</span>
+            <span id="diagPort" class="diag-val">—</span>
+          </div>
+          <div class="diagnostic-row">
+            <span class="diag-label">Host Version:</span>
+            <span id="diagVersion" class="diag-val">—</span>
+          </div>
+        </div>
+
+        <div class="host-actions">
+          <button id="testHostBtn" class="secondary-btn">Test Connection</button>
+        </div>
+
+        <div class="install-guide">
+          <span class="guide-title">If the host is not connected:</span>
+          <p>Register the native messaging manifest by running in your terminal:</p>
+          <pre><code>forge-dm host --install</code></pre>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

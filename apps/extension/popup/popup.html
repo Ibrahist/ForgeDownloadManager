@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Forge Download Manager</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <svg class="brand-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 6h16l-2 5H6L4 6z"></path>
+          <path d="M6 11v7a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-7"></path>
+          <line x1="12" y1="14" x2="12" y2="17"></line>
+        </svg>
+        <div class="brand-text">
+          <h1>Forge</h1>
+          <span class="version">v0.1.0</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div id="connectionStatus" class="status-pill status-disconnected">
+          <span class="status-dot"></span>
+          <span class="status-label">Standby</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Master Interception Bar -->
+    <div class="interception-card">
+      <div class="interception-info">
+        <span class="interception-title">Download Interception</span>
+        <span class="interception-sub">Auto-catch browser downloads</span>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="interceptionToggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button class="tab-btn active" data-tab="tab-overview">Overview</button>
+      <button class="tab-btn" data-tab="tab-media">
+        Media <span id="mediaBadge" class="tab-counter">0</span>
+      </button>
+      <button class="tab-btn" data-tab="tab-links">Page Links</button>
+    </nav>
+
+    <!-- Tab 1: Overview -->
+    <main id="tab-overview" class="tab-content active">
+      <!-- Quick Add URL -->
+      <section class="card quick-add-card">
+        <div class="card-label">Quick Download</div>
+        <div class="input-group">
+          <input type="url" id="quickUrlInput" placeholder="Paste URL here..." autocomplete="off">
+          <button id="quickAddBtn" class="primary-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+            <span>Add</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Stats Grid -->
+      <section class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-val" id="statIntercepted">0</span>
+          <span class="stat-label">Intercepted</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-val" id="statActive">0</span>
+          <span class="stat-label">Active Jobs</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-val" id="statRules">0</span>
+          <span class="stat-label">Site Rules</span>
+        </div>
+      </section>
+
+      <!-- Quick Toggles -->
+      <section class="card settings-summary-card">
+        <div class="setting-row">
+          <div class="setting-label-group">
+            <span class="setting-title">Alt Key Bypass</span>
+            <span class="setting-desc">Hold Alt to download in browser</span>
+          </div>
+          <label class="switch small">
+            <input type="checkbox" id="altBypassToggle" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+      </section>
+    </main>
+
+    <!-- Tab 2: Media Sniffer -->
+    <main id="tab-media" class="tab-content">
+      <div class="tab-header-row">
+        <span class="section-title">Detected Media</span>
+        <button id="refreshMediaBtn" class="icon-btn" title="Rescan page">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="23 4 23 10 17 10"></polyline>
+            <polyline points="1 20 1 14 7 14"></polyline>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+          </svg>
+        </button>
+      </div>
+      <div id="mediaList" class="scroll-list">
+        <div class="empty-state">No audio or video streams detected on this tab.</div>
+      </div>
+    </main>
+
+    <!-- Tab 3: Page Links -->
+    <main id="tab-links" class="tab-content">
+      <div class="tab-header-row">
+        <span class="section-title">Links on Page</span>
+        <button id="scanLinksBtn" class="small-btn">Scan Tab</button>
+      </div>
+      <div class="filter-row">
+        <input type="text" id="linkFilterInput" placeholder="Filter by extension (e.g. zip, pdf)...">
+      </div>
+      <div id="linksList" class="scroll-list">
+        <div class="empty-state">Click "Scan Tab" to extract downloadable links.</div>
+      </div>
+      <div class="tab-footer-action">
+        <button id="downloadAllLinksBtn" class="primary-btn full-width" disabled>Download Selected (<span id="selectedCount">0</span>)</button>
+      </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <button id="openOptionsBtn" class="footer-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+        <span>Options</span>
+      </button>
+      <div id="quickNotice" class="quick-notice"></div>
+    </footer>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

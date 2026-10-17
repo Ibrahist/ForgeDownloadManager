@@ -184,6 +184,8 @@ pub struct AddRequest {
     pub duplicate_policy: DuplicatePolicy,
     pub checksum_algo: Option<ChecksumAlgo>,
     pub checksum_expected: Option<String>,
+    pub queue_id: Option<Uuid>,
+    pub priority: Option<i64>,
 }
 
 impl AddRequest {
@@ -207,6 +209,8 @@ impl AddRequest {
             duplicate_policy: DuplicatePolicy::Rename,
             checksum_algo: None,
             checksum_expected: None,
+            queue_id: None,
+            priority: None,
         }
     }
 }
@@ -306,4 +310,105 @@ pub struct SegmentProgress {
     pub start: u64,
     pub end: Option<u64>,
     pub cursor: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SiteRuleAction {
+    Intercept,
+    Exclude,
+}
+
+impl SiteRuleAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Intercept => "intercept",
+            Self::Exclude => "exclude",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "intercept" => Some(Self::Intercept),
+            "exclude" => Some(Self::Exclude),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiteRule {
+    pub id: Uuid,
+    pub pattern: String,
+    pub action: SiteRuleAction,
+    pub created_at: i64,
+}
+
+impl SiteRule {
+    pub fn new(pattern: impl Into<String>, action: SiteRuleAction) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            pattern: pattern.into(),
+            action,
+            created_at: now_ms(),
+        }
+    }
+
+    /// Tests if a hostname matches this rule's pattern (supports exact match, domain suffix, or wildcard).
+    pub fn matches_host(&self, host: &str) -> bool {
+        let pattern = self.pattern.trim().to_ascii_lowercase();
+        let host = host.trim().to_ascii_lowercase();
+        if pattern == host {
+            return true;
+        }
+        if let Some(suffix) = pattern.strip_prefix("*.") {
+            if host == suffix || host.ends_with(&format!(".{suffix}")) {
+                return true;
+            }
+        }
+        if let Some(suffix) = pattern.strip_prefix('.') {
+            if host == suffix || host.ends_with(&format!(".{suffix}")) {
+                return true;
+            }
+        }
+        if pattern.starts_with('*') && pattern.ends_with('*') && pattern.len() > 2 {
+            let inner = &pattern[1..pattern.len() - 1];
+            return host.contains(inner);
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn site_rule_matching() {
+        let rule_exact = SiteRule::new("example.com", SiteRuleAction::Intercept);
+        assert!(rule_exact.matches_host("example.com"));
+        assert!(rule_exact.matches_host("EXAMPLE.COM"));
+        assert!(!rule_exact.matches_host("sub.example.com"));
+        assert!(!rule_exact.matches_host("other.com"));
+
+        let rule_wildcard = SiteRule::new("*.github.com", SiteRuleAction::Exclude);
+        assert!(rule_wildcard.matches_host("github.com"));
+        assert!(rule_wildcard.matches_host("raw.github.com"));
+        assert!(rule_wildcard.matches_host("assets.cdn.github.com"));
+        assert!(!rule_wildcard.matches_host("notgithub.com"));
+
+        let rule_contains = SiteRule::new("*video*", SiteRuleAction::Intercept);
+        assert!(rule_contains.matches_host("myvideosite.org"));
+        assert!(rule_contains.matches_host("stream.video.cdn.net"));
+        assert!(!rule_contains.matches_host("audio.cdn.net"));
+    }
+
+    #[test]
+    fn site_rule_action_parsing() {
+        assert_eq!(SiteRuleAction::parse("intercept"), Some(SiteRuleAction::Intercept));
+        assert_eq!(SiteRuleAction::parse("INTERCEPT"), Some(SiteRuleAction::Intercept));
+        assert_eq!(SiteRuleAction::parse("exclude"), Some(SiteRuleAction::Exclude));
+        assert_eq!(SiteRuleAction::parse("  EXCLUDE  "), Some(SiteRuleAction::Exclude));
+        assert_eq!(SiteRuleAction::parse("invalid"), None);
+    }
 }

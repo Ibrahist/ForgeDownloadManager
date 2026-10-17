@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::error::Error;
 use crate::model::{
     i64_to_u64, now_ms, u64_to_i64, ChecksumAlgo, Download, DownloadStatus, DuplicatePolicy,
-    Segment, SegmentStatus,
+    Segment, SegmentStatus, SiteRule, SiteRuleAction,
 };
+use crate::schedule::{current_local_time, is_window_active, OnCompleteAction, Queue};
 use crate::Result;
 
 pub const DEFAULT_QUEUE_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -374,21 +375,88 @@ impl Store {
     }
 
     pub fn claim_queued(&self, limit: usize) -> Result<Vec<Uuid>> {
-        if limit == 0 {
+        let (hour, minute, weekday) = current_local_time();
+        self.claim_queued_for_open_queues(limit, (hour, minute, weekday))
+    }
+
+    pub fn claim_queued_for_open_queues(
+        &self,
+        global_limit: usize,
+        current_time: (u32, u32, u8),
+    ) -> Result<Vec<Uuid>> {
+        if global_limit == 0 {
             return Ok(Vec::new());
         }
         let mut conn = self.conn.borrow_mut();
         let tx = conn.transaction()?;
-        let mut stmt = tx.prepare(
-            "SELECT id FROM downloads WHERE status = 'queued'
-             ORDER BY priority ASC, created_at ASC LIMIT ?1",
+
+        let mut q_stmt = tx.prepare(
+            "SELECT id, concurrency, schedule_start, schedule_end, days_mask FROM queues",
         )?;
-        let ids: Vec<String> = stmt
-            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| row.get(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(stmt);
+        let queue_specs: Vec<(String, usize, Option<String>, Option<String>, u8)> = q_stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                let conc: i64 = row.get(1)?;
+                let start: Option<String> = row.get(2)?;
+                let end: Option<String> = row.get(3)?;
+                let mask: i64 = row.get(4)?;
+                Ok((
+                    id,
+                    usize::try_from(conc).unwrap_or(1).max(1),
+                    start,
+                    end,
+                    u8::try_from(mask).unwrap_or(127),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(q_stmt);
+
+        let mut remaining_global = global_limit;
+        let mut selected_ids = Vec::new();
+
+        for (q_id, conc, start, end, mask) in queue_specs {
+            if remaining_global == 0 {
+                break;
+            }
+
+            if !is_window_active(
+                start.as_deref(),
+                end.as_deref(),
+                mask,
+                current_time.0,
+                current_time.1,
+                current_time.2,
+            ) {
+                continue;
+            }
+
+            let active: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM downloads WHERE queue_id = ?1 AND status IN ('downloading', 'probing')",
+                [&q_id],
+                |row| row.get(0),
+            )?;
+            let active_count = usize::try_from(active).unwrap_or(0);
+            let q_slots = conc.saturating_sub(active_count);
+            if q_slots == 0 {
+                continue;
+            }
+
+            let take = q_slots.min(remaining_global);
+            let mut d_stmt = tx.prepare(
+                "SELECT id FROM downloads WHERE status = 'queued' AND queue_id = ?1
+                 ORDER BY priority ASC, created_at ASC LIMIT ?2",
+            )?;
+            let ids: Vec<String> = d_stmt
+                .query_map(params![q_id, i64::try_from(take).unwrap_or(i64::MAX)], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(d_stmt);
+
+            remaining_global = remaining_global.saturating_sub(ids.len());
+            selected_ids.extend(ids);
+        }
+
         let now = now_ms();
-        for id in &ids {
+        for id in &selected_ids {
             tx.execute(
                 "UPDATE downloads
                  SET status = 'downloading', updated_at = ?1,
@@ -398,7 +466,11 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        ids.into_iter().map(|id| Uuid::parse_str(&id).map_err(|err| Error::InvalidId(err.to_string()))).collect()
+
+        selected_ids
+            .into_iter()
+            .map(|id| Uuid::parse_str(&id).map_err(|err| Error::InvalidId(err.to_string())))
+            .collect()
     }
 
     pub fn count_active(&self) -> Result<usize> {
@@ -419,6 +491,120 @@ impl Store {
         Ok(changed)
     }
 
+    pub fn list_queues(&self) -> Result<Vec<Queue>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, concurrency, speed_limit_bps, schedule_start, schedule_end,
+                    days_mask, on_complete, on_complete_command, created_at
+             FROM queues ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], map_queue)?;
+        let mut queues = Vec::new();
+        for row in rows {
+            queues.push(row?);
+        }
+        Ok(queues)
+    }
+
+    pub fn get_queue(&self, id: Uuid) -> Result<Option<Queue>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, concurrency, speed_limit_bps, schedule_start, schedule_end,
+                    days_mask, on_complete, on_complete_command, created_at
+             FROM queues WHERE id = ?1",
+        )?;
+        stmt.query_row([id.to_string()], map_queue).optional().map_err(Error::from)
+    }
+
+    pub fn get_queue_by_name(&self, name: &str) -> Result<Option<Queue>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, concurrency, speed_limit_bps, schedule_start, schedule_end,
+                    days_mask, on_complete, on_complete_command, created_at
+             FROM queues WHERE LOWER(name) = LOWER(?1)",
+        )?;
+        stmt.query_row([name], map_queue).optional().map_err(Error::from)
+    }
+
+    pub fn create_queue(&self, queue: &Queue) -> Result<()> {
+        self.conn.borrow().execute(
+            "INSERT INTO queues (
+                id, name, concurrency, speed_limit_bps, schedule_start, schedule_end,
+                days_mask, on_complete, on_complete_command, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                queue.id.to_string(),
+                queue.name,
+                u64_to_i64(queue.concurrency as u64)?,
+                opt_u64(queue.speed_limit_bps)?,
+                queue.schedule_start,
+                queue.schedule_end,
+                i64::from(queue.days_mask),
+                queue.on_complete.as_str(),
+                queue.on_complete_command,
+                queue.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_queue(&self, queue: &Queue) -> Result<()> {
+        let changed = self.conn.borrow().execute(
+            "UPDATE queues SET
+                name = ?1, concurrency = ?2, speed_limit_bps = ?3, schedule_start = ?4,
+                schedule_end = ?5, days_mask = ?6, on_complete = ?7, on_complete_command = ?8
+             WHERE id = ?9",
+            params![
+                queue.name,
+                u64_to_i64(queue.concurrency as u64)?,
+                opt_u64(queue.speed_limit_bps)?,
+                queue.schedule_start,
+                queue.schedule_end,
+                i64::from(queue.days_mask),
+                queue.on_complete.as_str(),
+                queue.on_complete_command,
+                queue.id.to_string(),
+            ],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound(queue.id));
+        }
+        Ok(())
+    }
+
+    pub fn delete_queue(&self, id: Uuid) -> Result<()> {
+        if id == default_queue_id() {
+            return Err(Error::Failed("cannot delete the Default queue".into()));
+        }
+        let mut conn = self.conn.borrow_mut();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE downloads SET queue_id = ?1 WHERE queue_id = ?2",
+            params![DEFAULT_QUEUE_ID, id.to_string()],
+        )?;
+        let changed = tx.execute("DELETE FROM queues WHERE id = ?1", params![id.to_string()])?;
+        if changed == 0 {
+            return Err(Error::NotFound(id));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn queue_counts(&self, id: Uuid) -> Result<(usize, usize)> {
+        let conn = self.conn.borrow();
+        let active: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM downloads WHERE queue_id = ?1 AND status IN ('downloading', 'probing')",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        let queued: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM downloads WHERE queue_id = ?1 AND status = 'queued'",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        Ok((usize::try_from(active).unwrap_or(0), usize::try_from(queued).unwrap_or(0)))
+    }
+
     pub fn queue_concurrency(&self, id: Uuid) -> Result<usize> {
         let value: i64 = self.conn.borrow().query_row(
             "SELECT concurrency FROM queues WHERE id=?1",
@@ -426,6 +612,90 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(usize::try_from(value).unwrap_or(1).max(1))
+    }
+
+    pub fn list_site_rules(&self) -> Result<Vec<SiteRule>> {
+        let conn = self.conn.borrow();
+        let mut stmt = conn.prepare("SELECT id, pattern, action, created_at FROM site_rules ORDER BY created_at ASC")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let pattern: String = row.get(1)?;
+            let action_str: String = row.get(2)?;
+            let created_at: i64 = row.get(3)?;
+            Ok((id, pattern, action_str, created_at))
+        })?;
+        let mut list = Vec::new();
+        for item in rows {
+            let (id, pattern, action_str, created_at) = item?;
+            let id = Uuid::parse_str(&id).map_err(|e| Error::Failed(e.to_string()))?;
+            let action = SiteRuleAction::parse(&action_str).unwrap_or(SiteRuleAction::Intercept);
+            list.push(SiteRule {
+                id,
+                pattern,
+                action,
+                created_at,
+            });
+        }
+        Ok(list)
+    }
+
+    pub fn get_site_rule(&self, id: Uuid) -> Result<Option<SiteRule>> {
+        let conn = self.conn.borrow();
+        conn.query_row(
+            "SELECT id, pattern, action, created_at FROM site_rules WHERE id = ?1",
+            [id.to_string()],
+            |row| {
+                let id: String = row.get(0)?;
+                let pattern: String = row.get(1)?;
+                let action_str: String = row.get(2)?;
+                let created_at: i64 = row.get(3)?;
+                Ok((id, pattern, action_str, created_at))
+            },
+        )
+        .optional()
+        .map_err(Error::from)?
+        .map(|(id, pattern, action_str, created_at)| {
+            let id = Uuid::parse_str(&id).map_err(|e| Error::Failed(e.to_string()))?;
+            let action = SiteRuleAction::parse(&action_str).unwrap_or(SiteRuleAction::Intercept);
+            Ok(SiteRule {
+                id,
+                pattern,
+                action,
+                created_at,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn create_site_rule(&self, rule: SiteRule) -> Result<SiteRule> {
+        self.conn.borrow().execute(
+            "INSERT INTO site_rules (id, pattern, action, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                rule.id.to_string(),
+                rule.pattern,
+                rule.action.as_str(),
+                rule.created_at,
+            ],
+        )?;
+        Ok(rule)
+    }
+
+    pub fn delete_site_rule(&self, id: Uuid) -> Result<()> {
+        let changed = self.conn.borrow().execute("DELETE FROM site_rules WHERE id = ?1", [id.to_string()])?;
+        if changed == 0 {
+            return Err(Error::NotFound(id));
+        }
+        Ok(())
+    }
+
+    pub fn match_site_rule(&self, host: &str) -> Result<Option<SiteRuleAction>> {
+        let rules = self.list_site_rules()?;
+        for rule in rules {
+            if rule.matches_host(host) {
+                return Ok(Some(rule.action));
+            }
+        }
+        Ok(None)
     }
 
     pub fn setting_u64(&self, key: &str) -> Result<Option<u64>> {
@@ -632,6 +902,36 @@ fn seed(conn: &Connection) -> Result<()> {
         conn.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", params![key, value])?;
     }
     Ok(())
+}
+
+fn map_queue(row: &Row<'_>) -> rusqlite::Result<Queue> {
+    let id_str: String = row.get(0)?;
+    let id = Uuid::parse_str(&id_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let name: String = row.get(1)?;
+    let concurrency: i64 = row.get(2)?;
+    let speed_limit_bps: Option<i64> = row.get(3)?;
+    let schedule_start: Option<String> = row.get(4)?;
+    let schedule_end: Option<String> = row.get(5)?;
+    let days_mask: i64 = row.get(6)?;
+    let on_complete_str: String = row.get(7)?;
+    let on_complete = OnCompleteAction::parse(&on_complete_str).unwrap_or(OnCompleteAction::None);
+    let on_complete_command: Option<String> = row.get(8)?;
+    let created_at: i64 = row.get(9)?;
+
+    Ok(Queue {
+        id,
+        name,
+        concurrency: usize::try_from(concurrency).unwrap_or(1).max(1),
+        speed_limit_bps: speed_limit_bps.map(i64_to_u64).filter(|r| *r > 0),
+        schedule_start,
+        schedule_end,
+        days_mask: u8::try_from(days_mask).unwrap_or(127),
+        on_complete,
+        on_complete_command,
+        created_at,
+    })
 }
 
 fn download_from_row(row: &Row<'_>) -> rusqlite::Result<Download> {

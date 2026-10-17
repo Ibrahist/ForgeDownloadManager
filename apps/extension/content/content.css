@@ -1,0 +1,60 @@
+/* Forge Download Manager — Floating Media Badge */
+.forge-media-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2147483640;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(18, 22, 29, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #f3f4f6;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  border: 1px solid rgba(249, 115, 22, 0.4);
+  border-radius: 6px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Show on hover of parent or badge itself */
+*:hover > .forge-media-badge,
+.forge-media-badge:hover {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.forge-media-badge:hover {
+  background: rgba(24, 29, 39, 0.95);
+  border-color: #f97316;
+  color: #ffedd5;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(249, 115, 22, 0.25);
+}
+
+.forge-media-badge svg {
+  color: #f97316;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.forge-media-badge:hover svg {
+  transform: translateY(1px);
+}
+
+.forge-media-badge.forge-badge-sent {
+  border-color: #22c55e;
+  color: #bbf7d0;
+}
+
+.forge-media-badge.forge-badge-sent svg {
+  color: #22c55e;
+}

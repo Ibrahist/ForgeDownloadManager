@@ -223,3 +223,105 @@ async fn second_process_can_pause_and_resume() {
     let _ = fs::remove_dir_all(&data);
     let _ = fs::remove_dir_all(&save);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_messaging_host_stdio_exchange() {
+    use std::io::{Read, Write};
+
+    let data = temp_dir("host-data");
+    let mut child = Command::new(bin())
+        .args(["--data-dir", data.to_str().unwrap(), "host"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn host");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    // Helper: send message
+    let send_msg = |stdin: &mut std::process::ChildStdin, val: serde_json::Value| {
+        let bytes = serde_json::to_vec(&val).unwrap();
+        let len = (bytes.len() as u32).to_ne_bytes();
+        stdin.write_all(&len).unwrap();
+        stdin.write_all(&bytes).unwrap();
+        stdin.flush().unwrap();
+    };
+
+    // Helper: read response
+    let read_msg = |stdout: &mut std::process::ChildStdout| -> serde_json::Value {
+        let mut len_bytes = [0u8; 4];
+        stdout.read_exact(&mut len_bytes).unwrap();
+        let len = u32::from_ne_bytes(len_bytes) as usize;
+        let mut buf = vec![0u8; len];
+        stdout.read_exact(&mut buf).unwrap();
+        serde_json::from_slice(&buf).unwrap()
+    };
+
+    // 1. Send Ping
+    send_msg(&mut stdin, serde_json::json!({ "type": "ping" }));
+    let resp = read_msg(&mut stdout);
+    assert_eq!(resp.get("type").and_then(|v| v.as_str()), Some("pong"));
+    assert_eq!(resp.get("version").and_then(|v| v.as_str()), Some(env!("CARGO_PKG_VERSION")));
+
+    // 2. Send SiteRules
+    send_msg(&mut stdin, serde_json::json!({ "type": "site_rules" }));
+    let resp = read_msg(&mut stdout);
+    assert_eq!(resp.get("type").and_then(|v| v.as_str()), Some("site_rules"));
+    assert!(resp.get("rules").unwrap().is_array());
+
+    // 3. Send Add (Offline SQLite queuing)
+    send_msg(&mut stdin, serde_json::json!({
+        "type": "add",
+        "url": "https://example.com/test_archive.zip",
+        "filename": "archive.zip",
+        "referer": "https://example.com",
+        "cookies": [{"name": "auth", "value": "secret"}]
+    }));
+    let resp = read_msg(&mut stdout);
+    assert_eq!(resp.get("type").and_then(|v| v.as_str()), Some("add_response"));
+    assert_eq!(resp.get("success").and_then(|v| v.as_bool()), Some(true));
+    assert!(resp.get("id").unwrap().is_string());
+    assert_eq!(resp.get("offline").and_then(|v| v.as_bool()), Some(true));
+
+    // Drop stdin to signal EOF and close host
+    drop(stdin);
+    let status = child.wait().expect("wait host");
+    assert!(status.success());
+
+    let _ = fs::remove_dir_all(&data);
+}
+
+#[test]
+fn media_tools_cli_json() {
+    let data = temp_dir("media-tools");
+    let args = vec![
+        "--data-dir".into(),
+        data.display().to_string(),
+        "media".into(),
+        "tools".into(),
+        "--json".into(),
+    ];
+    let res = output(&args);
+    assert!(res.status.success(), "{}", String::from_utf8_lossy(&res.stderr));
+    let val: serde_json::Value = serde_json::from_slice(&res.stdout).expect("valid json");
+    assert!(val.get("ffmpeg").is_some());
+    assert!(val.get("ytdlp").is_some());
+    let _ = fs::remove_dir_all(&data);
+}
+
+#[test]
+fn media_install_ytdlp_requires_consent() {
+    let data = temp_dir("media-consent");
+    let args = vec![
+        "--data-dir".into(),
+        data.display().to_string(),
+        "media".into(),
+        "install-ytdlp".into(),
+    ];
+    let res = output(&args);
+    assert!(!res.status.success());
+    let stderr = String::from_utf8_lossy(&res.stderr);
+    assert!(stderr.contains("consent") || stderr.contains("Consent"));
+    let _ = fs::remove_dir_all(&data);
+}

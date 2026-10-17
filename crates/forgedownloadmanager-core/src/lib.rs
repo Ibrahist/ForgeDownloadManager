@@ -11,12 +11,15 @@ pub mod control;
 pub mod error;
 pub mod events;
 pub mod filename;
+pub mod grabber;
 pub mod limiter;
 pub mod lock;
+pub mod media;
 pub mod model;
 pub mod probe;
 pub mod proxy;
 pub mod retry;
+pub mod schedule;
 pub mod secrets;
 pub mod segment;
 pub mod store;
@@ -33,8 +36,16 @@ pub use error::Error;
 pub use events::EngineEvent;
 pub use model::{
     AddRequest, ChecksumAlgo, Download, DownloadStatus, DuplicatePolicy, Segment, SegmentProgress,
-    SegmentStatus,
+    SegmentStatus, SiteRule, SiteRuleAction,
 };
+pub use media::{
+    check_media_tools, create_media_client, download_and_remux_stream, download_media_url,
+    parse_dash, parse_hls, probe_media_stream, resolve_media_segments, DashManifest,
+    DashRepresentation, FfmpegRemuxer, HlsPlaylist, HlsSegment, HlsVariant, MediaProbeResult,
+    MediaToolsStatus, YtDlpPlugin,
+};
+pub use schedule::{OnCompleteAction, Queue};
+pub use tokio_util::sync::CancellationToken;
 
 #[doc(hidden)]
 pub mod testutil;

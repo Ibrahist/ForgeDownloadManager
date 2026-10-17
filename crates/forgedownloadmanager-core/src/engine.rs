@@ -21,13 +21,14 @@ use crate::filename::{self, partial_name};
 use crate::limiter::{self, Pace, TokenBucket};
 use crate::model::{
     now_ms, AddRequest, ChecksumAlgo, Download, DownloadStatus, DuplicatePolicy, Segment,
-    SegmentProgress, SegmentStatus,
+    SegmentProgress, SegmentStatus, SiteRule, SiteRuleAction,
 };
 use crate::probe::{self, Probe, RequestMeta};
 use crate::proxy::{self, ResolvedProxy};
 use crate::retry;
 use crate::secrets::{KeyringSecrets, SecretStore};
 use crate::segment::{plan_segments, split_remainder};
+use crate::schedule::{OnCompleteAction, Queue};
 use crate::store::{self, Store};
 use crate::writer::SegmentFile;
 use crate::Result;
@@ -394,6 +395,85 @@ impl Engine {
         })
     }
 
+    pub fn list_queues(&self) -> Result<Vec<Queue>> {
+        self.with_store(|store| store.list_queues())
+    }
+
+    pub fn get_queue(&self, id: Uuid) -> Result<Option<Queue>> {
+        self.with_store(|store| store.get_queue(id))
+    }
+
+    pub fn get_queue_by_name(&self, name: &str) -> Result<Option<Queue>> {
+        self.with_store(|store| store.get_queue_by_name(name))
+    }
+
+    pub fn create_queue(&self, queue: Queue) -> Result<()> {
+        self.with_store(|store| store.create_queue(&queue))
+    }
+
+    pub fn update_queue(&self, queue: Queue) -> Result<()> {
+        self.with_store(|store| store.update_queue(&queue))
+    }
+
+    pub fn delete_queue(&self, id: Uuid) -> Result<()> {
+        self.with_store(|store| store.delete_queue(id))
+    }
+
+    pub fn queue_counts(&self, id: Uuid) -> Result<(usize, usize)> {
+        self.with_store(|store| store.queue_counts(id))
+    }
+
+    pub fn list_site_rules(&self) -> Result<Vec<SiteRule>> {
+        self.with_store(|store| store.list_site_rules())
+    }
+
+    pub fn get_site_rule(&self, id: Uuid) -> Result<Option<SiteRule>> {
+        self.with_store(|store| store.get_site_rule(id))
+    }
+
+    pub fn create_site_rule(&self, rule: SiteRule) -> Result<SiteRule> {
+        self.with_store(|store| store.create_site_rule(rule))
+    }
+
+    pub fn delete_site_rule(&self, id: Uuid) -> Result<()> {
+        self.with_store(|store| store.delete_site_rule(id))
+    }
+
+    pub fn match_site_rule(&self, host: &str) -> Result<Option<SiteRuleAction>> {
+        self.with_store(|store| store.match_site_rule(host))
+    }
+
+    pub async fn add_batch(&self, urls: Vec<String>, base_request: AddRequest) -> Result<Vec<Uuid>> {
+        let mut ids = Vec::new();
+        for url in urls {
+            let mut req = base_request.clone();
+            req.url = url;
+            req.filename = None;
+            let id = self.add(req).await?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    pub async fn probe_media(&self, url: &str) -> Result<crate::media::MediaProbeResult> {
+        let client = crate::media::create_media_client()?;
+        crate::media::probe_media_stream(&client, url, None).await
+    }
+
+    pub fn media_tools_status(&self) -> crate::media::MediaToolsStatus {
+        crate::media::check_media_tools(None)
+    }
+
+    pub async fn download_media_stream(&self, segment_urls: &[String], output_file: &Path) -> Result<u64> {
+        let client = crate::media::create_media_client()?;
+        crate::media::download_and_remux_stream(&client, segment_urls, output_file, &self.shared.shutdown).await
+    }
+
+    pub async fn download_media_url(&self, url: &str, output_file: &Path) -> Result<u64> {
+        let client = crate::media::create_media_client()?;
+        crate::media::download_media_url(&client, url, output_file, &self.shared.shutdown).await
+    }
+
     fn with_store<T>(&self, f: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
         let store = lock(&self.shared.store);
         f(&store)
@@ -514,6 +594,16 @@ pub fn insert_request(
     let segment_count = request.segments.unwrap_or(default_segments).clamp(1, 32);
     let user_agent = request.user_agent.clone().unwrap_or_else(|| default_ua.to_string());
     let now = now_ms();
+    let queue_id = match request.queue_id {
+        Some(qid) => {
+            if store.get_queue(qid)?.is_none() {
+                return Err(Error::NotFound(qid));
+            }
+            qid
+        }
+        None => store::default_queue_id(),
+    };
+    let priority = request.priority.unwrap_or(0);
     let id = Uuid::new_v4();
     let credential_id = store_credential(store, secrets, &url, request)?;
     let download = Download {
@@ -523,8 +613,8 @@ pub fn insert_request(
         filename,
         save_dir,
         partial_path: partial,
-        queue_id: store::default_queue_id(),
-        priority: 0,
+        queue_id,
+        priority,
         status: if request.start { DownloadStatus::Queued } else { DownloadStatus::Paused },
         resumable: false,
         total_bytes: None,
@@ -648,7 +738,9 @@ async fn run_job(shared: Arc<Shared>, job: Arc<Job>) {
         execute(&shared, &job).await
     };
     match outcome {
-        Ok(DownloadStatus::Completed) => {}
+        Ok(DownloadStatus::Completed) => {
+            check_queue_completion(&shared, job.id).await;
+        }
         Ok(DownloadStatus::Paused) | Err(Error::Cancelled) => {
             if let Err(err) = mark_paused(&shared, &job).await {
                 tracing::warn!("pause {}: {err}", job.id);
@@ -665,6 +757,33 @@ async fn run_job(shared: Arc<Shared>, job: Arc<Job>) {
             } else if let Err(mark) = mark_failed(&shared, &job, &err).await {
                 tracing::warn!("fail {}: {mark}", job.id);
             }
+        }
+    }
+}
+
+async fn check_queue_completion(shared: &Arc<Shared>, completed_id: Uuid) {
+    let (queue, last_file) = {
+        let store = lock(&shared.store);
+        let Ok(download) = store.get(completed_id) else { return };
+        let Ok(Some(queue)) = store.get_queue(download.queue_id) else { return };
+        let Ok((active, queued)) = store.queue_counts(queue.id) else { return };
+        if active > 0 || queued > 0 {
+            return;
+        }
+        (queue, download.final_path())
+    };
+
+    if queue.on_complete != OnCompleteAction::None {
+        if queue.on_complete == OnCompleteAction::Quit {
+            shared.shutdown.cancel();
+        } else if let Err(err) = crate::schedule::trigger_completion_action(
+            queue.on_complete,
+            queue.on_complete_command.as_deref(),
+            Some(&last_file),
+        )
+        .await
+        {
+            tracing::warn!("queue completion action failed for {}: {err}", queue.id);
         }
     }
 }
