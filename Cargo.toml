@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Forge Download Manager contributors"]
-repository = "https://github.com/forgedownloadmanager/forgedownloadmanager"
+repository = "https://github.com/Ibrahist/ForgeDownloadManager"
 rust-version = "1.89"
 
 [workspace.dependencies]

@@ -40,7 +40,7 @@ if ($LocalBinary -and (Test-Path $LocalBinary)) {
     Write-Host "[2/5] Copying local binary from $LocalBinary..." -ForegroundColor Green
     Copy-Item -Path $LocalBinary -Destination $DestExe -Force
 } else {
-    $Repo = "forgedownloadmanager/forgedownloadmanager"
+    $Repo = "Ibrahist/ForgeDownloadManager"
     if ($Version -eq "latest") {
         $DownloadUrl = "https://github.com/$Repo/releases/latest/download/forge-dm-windows-x86_64.exe"
     } else {

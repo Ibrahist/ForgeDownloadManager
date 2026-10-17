@@ -8,7 +8,7 @@ Forge Download Manager is available in two editions:
 
 ## 1. Desktop GUI Installers
 
-Pre-built binaries and official installers are available on the [Releases Page](https://github.com/forgedownloadmanager/forgedownloadmanager/releases).
+Pre-built binaries and official installers are available on the [Releases Page](https://github.com/Ibrahist/ForgeDownloadManager/releases).
 
 ### Windows
 - **NSIS Installer (`.exe`)**: Standard setup wizard with desktop and Start Menu shortcuts, automatic uninstall support, and optional per-machine or current-user installation.
@@ -41,7 +41,7 @@ Pre-built binaries and official installers are available on the [Releases Page](
 ### Windows (PowerShell)
 Run the automated installation script in PowerShell:
 ```powershell
-irm https://raw.githubusercontent.com/forgedownloadmanager/forgedownloadmanager/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Ibrahist/ForgeDownloadManager/main/scripts/install.ps1 | iex
 ```
 This script:
 - Places `forge-dm.exe` into `%LOCALAPPDATA%\Programs\ForgeDownloadManager\bin`.
@@ -51,7 +51,7 @@ This script:
 ### Linux & macOS (Bash)
 Run the automated installation script in your terminal:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/forgedownloadmanager/forgedownloadmanager/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Ibrahist/ForgeDownloadManager/main/scripts/install.sh | bash
 ```
 This script:
 - Installs `forge-dm` into `~/.local/bin` (or `/usr/local/bin` if run with `sudo`).

@@ -6,7 +6,7 @@ set -euo pipefail
 # Installs forge-dm CLI and registers the browser Native Messaging Host.
 # ==============================================================================
 
-REPO="forgedownloadmanager/forgedownloadmanager"
+REPO="Ibrahist/ForgeDownloadManager"
 APP_NAME="forge-dm"
 
 echo "=========================================================="
