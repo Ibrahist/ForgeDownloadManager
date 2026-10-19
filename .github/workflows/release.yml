@@ -123,3 +123,25 @@ jobs:
           files: dist/forge-dm-extension.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-release:
+    name: Generate Checksums & Publish Release
+    needs: [release-desktop, release-cli, release-extension]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets, calculate SHA256, and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release-assets
+          gh release download "${{ github.ref_name }}" --dir release-assets || true
+          cd release-assets
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || true
+          if [ -s SHA256SUMS.txt ]; then
+            gh release upload "${{ github.ref_name }}" SHA256SUMS.txt --clobber
+          fi
+          gh release edit "${{ github.ref_name }}" --draft=false

@@ -58,6 +58,11 @@ else
     echo "Warning: Tauri build did not produce bundles (platform build dependencies may be missing)."
 fi
 
+# Stage installer scripts
+cp "${ROOT_DIR}/scripts/install.ps1" "${DIST_DIR}/install.ps1"
+cp "${ROOT_DIR}/scripts/install.sh" "${DIST_DIR}/install.sh"
+echo "      Installer scripts staged: install.ps1, install.sh"
+
 # 5. Generate Checksums
 echo "[4/4] Generating SHA256SUMS.txt..."
 CHECKSUM_FILE="${DIST_DIR}/SHA256SUMS.txt"
