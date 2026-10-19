@@ -67,12 +67,36 @@ if (-not $SkipDesktop) {
         Write-Host "      Desktop binary staged: $DesktopDest" -ForegroundColor Gray
     }
 
+    $DllSrc = Join-Path $RootDir "apps\desktop\src-tauri\target\release\WebView2Loader.dll"
+    if (-not (Test-Path $DllSrc)) { $DllSrc = Join-Path $RootDir "export\WebView2Loader.dll" }
+    $DllDest = Join-Path $DistDir "WebView2Loader.dll"
+    if (Test-Path $DllSrc) {
+        Copy-Item -Path $DllSrc -Destination $DllDest -Force
+        Write-Host "      WebView2 runtime loader staged: $DllDest" -ForegroundColor Gray
+    }
+
     $TauriBundleDir = Join-Path $RootDir "apps\desktop\src-tauri\target\release\bundle"
     if (Test-Path $TauriBundleDir) {
         Get-ChildItem -Path $TauriBundleDir -Recurse -Include *.exe,*.msi,*.zip | ForEach-Object {
             Copy-Item -Path $_.FullName -Destination $DistDir -Force
             Write-Host "      Bundle staged: $($_.Name)" -ForegroundColor Gray
         }
+    }
+
+    # Create standalone portable desktop zip (contains .exe + WebView2Loader.dll)
+    if ((Test-Path $DesktopDest) -and (Test-Path $DllDest)) {
+        $PortableStageDir = Join-Path $RootDir "target\portable-desktop-staging"
+        if (Test-Path $PortableStageDir) { Remove-Item -Path $PortableStageDir -Recurse -Force }
+        New-Item -ItemType Directory -Path $PortableStageDir -Force | Out-Null
+        Copy-Item -Path $DesktopDest -Destination (Join-Path $PortableStageDir "forge-dm-desktop.exe") -Force
+        Copy-Item -Path $DllDest -Destination (Join-Path $PortableStageDir "WebView2Loader.dll") -Force
+        "Launch 'forge-dm-desktop.exe' to run Forge Download Manager without installation." | Out-File (Join-Path $PortableStageDir "README.txt") -Encoding utf8
+        
+        $PortableZipDest = Join-Path $DistDir "forge-dm-desktop-windows-x86_64-portable.zip"
+        if (Test-Path $PortableZipDest) { Remove-Item -Path $PortableZipDest -Force }
+        Compress-Archive -Path "$PortableStageDir\*" -DestinationPath $PortableZipDest -Force
+        Remove-Item -Path $PortableStageDir -Recurse -Force
+        Write-Host "      Portable Desktop ZIP created: $PortableZipDest" -ForegroundColor Gray
     }
 } else {
     Write-Host "      Skipping desktop bundle build (-SkipDesktop)." -ForegroundColor Gray
@@ -95,6 +119,9 @@ Copy-Item -Path $CliDest -Destination $BundleInstallersDir -Force
 if (Test-Path (Join-Path $DistDir "forge-dm-desktop-windows-x86_64.exe")) {
     Copy-Item -Path (Join-Path $DistDir "forge-dm-desktop-windows-x86_64.exe") -Destination $BundleInstallersDir -Force
 }
+if (Test-Path (Join-Path $DistDir "WebView2Loader.dll")) {
+    Copy-Item -Path (Join-Path $DistDir "WebView2Loader.dll") -Destination $BundleInstallersDir -Force
+}
 Copy-Item -Path (Join-Path $DistDir "install.ps1") -Destination $BundleInstallersDir -Force
 Copy-Item -Path (Join-Path $DistDir "install.sh") -Destination $BundleInstallersDir -Force
 
@@ -110,7 +137,7 @@ if (Test-Path $UnpackedExtDir) {
 Copy-Item -Path (Join-Path $RootDir "export\README.md") -Destination (Join-Path $BundleStageDir "README.md") -Force
 Copy-Item -Path (Join-Path $RootDir "LICENSE") -Destination (Join-Path $BundleStageDir "LICENSE") -Force
 
-$BundleZipDest = Join-Path $DistDir "forge-dm-v0.1.0-windows-x86_64-installer-bundle.zip"
+$BundleZipDest = Join-Path $DistDir "forge-dm-v0.1.1-windows-x86_64-installer-bundle.zip"
 if (Test-Path $BundleZipDest) { Remove-Item -Path $BundleZipDest -Force }
 Compress-Archive -Path "$BundleStageDir\*" -DestinationPath $BundleZipDest -Force
 Remove-Item -Path $BundleStageDir -Recurse -Force

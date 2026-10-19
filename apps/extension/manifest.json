@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Forge Download Manager Integration",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Seamless browser integration for Forge Download Manager: multi-segment acceleration, automatic download interception, cookie forwarding, and media sniffer.",
   "icons": {
     "16": "icons/icon-16.png",

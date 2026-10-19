@@ -1,5 +1,7 @@
 use std::path::Path;
 use std::process::Command;
+#[cfg(not(windows))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

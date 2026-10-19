@@ -185,7 +185,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       const res = await browser.runtime.sendMessage({ type: "ping_host" });
       if (res && res.ok && res.data) {
-        diagVersion.textContent = res.data.version || "v0.1.0";
+        diagVersion.textContent = res.data.version || "v0.1.1";
         if (res.data.running) {
           diagStatus.textContent = "Connected & Engine Active";
           diagStatus.className = "diag-val connected";

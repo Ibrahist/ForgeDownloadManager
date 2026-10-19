@@ -5,7 +5,7 @@
 
 [package]
 name = "forgedownloadmanager-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Forge Download Manager desktop shell"
 authors = ["Forge Download Manager contributors"]
 license = "MIT"
