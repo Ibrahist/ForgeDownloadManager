@@ -55,6 +55,11 @@ ForgeDownloadManager/
 ├── apps/
 │   ├── desktop/                     # Tauri 2 + React + TypeScript + Tailwind window
 │   └── extension/                   # Manifest V3 browser extension
+├── export/                          # Exported standalone installers & browser extension
+│   ├── installers/                  # Desktop GUI .exe, CLI .exe, install.ps1, install.sh
+│   ├── browser-extension/           # Packaged .zip & unpacked extension folder
+│   ├── SHA256SUMS.txt               # Verification checksums
+│   └── README.md                    # Export usage instructions
 ├── dist/
 │   └── installers/                  # Staged installer bundles & release binaries
 ├── docs/                            # Guides (INSTALL.md, THIRD_PARTY.md)
@@ -68,6 +73,48 @@ ForgeDownloadManager/
 ## Installers & Downloads
 
 Official releases, installer bundles, and release checksums are published on the [GitHub Releases](https://github.com/Ibrahist/ForgeDownloadManager/releases) page.
+
+### Exported Installers & Browser Extension (Project Root)
+
+All standalone executables, automated installers, and browser extension packages are exported to the **[`export/`](export/)** folder located directly in the root of the project (also aliased as **[`exports/`](exports/)**):
+
+```text
+export/
+├── installers/
+│   ├── forge-dm-desktop-windows-x86_64.exe   # Desktop GUI Application (Tauri 2 + React 19)
+│   ├── forge-dm-windows-x86_64.exe           # Headless CLI binary & Native Messaging host
+│   ├── install.ps1                           # Automated Windows PowerShell installer
+│   └── install.sh                            # Automated Linux/macOS Bash installer
+├── browser-extension/
+│   ├── forge-dm-extension.zip                # Packaged MV3 extension archive (.zip)
+│   └── unpacked/                             # Unpacked extension directory for Developer Mode
+├── forge-dm-desktop-windows-x86_64.exe       # Direct shortcut to Desktop GUI
+├── forge-dm-windows-x86_64.exe               # Direct shortcut to CLI binary
+├── forge-dm-extension.zip                   # Direct shortcut to extension archive
+├── install.ps1                              # Direct shortcut to Windows installer
+├── install.sh                               # Direct shortcut to Linux/macOS installer
+├── SHA256SUMS.txt                           # Cryptographic SHA-256 verification hashes
+└── README.md                                # Dedicated export documentation
+```
+
+#### How to Use Exported Installers & Extension:
+
+- **Desktop GUI Application:**
+  - Launch `export/installers/forge-dm-desktop-windows-x86_64.exe` (or the root shortcut `export/forge-dm-desktop-windows-x86_64.exe`). It starts the visual download manager immediately without installation.
+- **Standalone CLI:**
+  - Run `export/installers/forge-dm-windows-x86_64.exe` directly from the terminal (e.g. `.\export\forge-dm-windows-x86_64.exe --help`).
+- **Automated Windows Installation (CLI & Native Host):**
+  - Run PowerShell:
+    ```powershell
+    powershell -ExecutionPolicy Bypass -File .\export\installers\install.ps1 -LocalBinary .\export\installers\forge-dm-windows-x86_64.exe
+    ```
+  - Automatically copies `forge-dm.exe` into `%LOCALAPPDATA%\Programs\ForgeDownloadManager\bin`, configures your `PATH`, and registers native host manifests for Chrome, Edge, Brave, Vivaldi, and Firefox.
+- **Browser Extension:**
+  - **Chrome, Edge, Brave, Vivaldi:** Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**, and click **Load unpacked**, selecting the [`export/browser-extension/unpacked`](export/browser-extension/unpacked) folder (or drag and drop `export/browser-extension/forge-dm-extension.zip`).
+  - **Firefox:** Open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on...**, and choose `export/browser-extension/unpacked/manifest.json`.
+  - Complete the native host registration with `.\export\forge-dm-windows-x86_64.exe host --install`.
+- **Integrity Check:**
+  - Hashes for all exported artifacts are recorded in [`export/SHA256SUMS.txt`](export/SHA256SUMS.txt).
 
 ### Pre-Built Packages
 
@@ -111,6 +158,7 @@ When building installers from source using `./scripts/build-installers.sh` or `.
   - **Linux:** `bundle/appimage/*.AppImage`, `bundle/deb/*.deb`
 
 For silent enterprise installations, package managers (`winget`, `scoop`, `brew`), and browser extension sideloading, see the complete [Installation Guide (docs/INSTALL.md)](docs/INSTALL.md).
+
 
 ## Getting Started
 

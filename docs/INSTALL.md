@@ -126,7 +126,7 @@ The extension connects directly to Forge Download Manager through the Native Mes
 ./scripts/build-installers.sh
 ```
 
-All built artifacts (`forge-dm` executable, `forge-dm-extension.zip`, and desktop installer bundles) will be staged in `dist/installers/` alongside `SHA256SUMS.txt`.
+All built artifacts (`forge-dm` executable, `forge-dm-extension.zip`, and desktop installer bundles) will be staged in `dist/installers/` and exported to the project root **[`export/`](../export/)** folder (also aliased as **`exports/`**) alongside `SHA256SUMS.txt`.
 
 ---
 
