@@ -10,6 +10,7 @@ Forge Download Manager is made up of a high-performance Rust engine library, a c
 
 > **Status:** Production-ready core (v0.1.0). All Phases 1 through 7 are complete, featuring cross-platform desktop installers, standalone CLI binaries, and automated installation scripts. See [Roadmap](#roadmap).
 
+
 ## Table of Contents
 
 - [Features](#features)
